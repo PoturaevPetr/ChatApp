@@ -123,3 +123,27 @@ export async function createRoom(
     user_id: data.user_id ?? userId,
   };
 }
+
+/**
+ * Удалить чат "для меня".
+ * DELETE /api/v1/rooms/{room_id}
+ */
+export async function deleteRoom(accessToken: string, roomId: string): Promise<void> {
+  const id = roomId.trim();
+  if (!id) return;
+  const url = `${BASE_URL.replace(/\/$/, "")}/api/v1/rooms/${encodeURIComponent(id)}`;
+  const res = await fetch(url, {
+    method: "DELETE",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    const detail =
+      typeof (data as { detail?: string }).detail === "string"
+        ? (data as { detail: string }).detail
+        : res.statusText;
+    throw new Error(detail || `HTTP ${res.status}`);
+  }
+}

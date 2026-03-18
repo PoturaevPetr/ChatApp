@@ -267,6 +267,8 @@ interface ChatState {
   setActiveChat: (currentUserId: string, otherUser: ChatUser) => void;
   clearActiveChat: () => void;
   markAsRead: (currentUserId: string, otherUserId: string) => void;
+  /** Удалить чат из списка (по roomId) локально. */
+  removeChatByRoomId: (roomId: string) => void;
   addIncomingWsMessage: (payload: {
     message_id: string;
     sender_id: string;
@@ -518,9 +520,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const { room_id } = await createRoom(tokens.access_token, recipientId);
         roomId = room_id;
         set({ activeRoomId: room_id });
+        // If WS already connected, immediately join and wait for ack.
         if (chatWebSocket.isConnected()) {
           console.log("[Chat] Вход в чат (новая комната): room_id=", room_id);
-          chatWebSocket.send({ type: "join_room", data: { room_id } });
+          await chatWebSocket.joinRoom(room_id, 2500);
         }
       } catch (e) {
         console.warn("createRoom failed:", e);
@@ -543,8 +546,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     if (roomId) {
-      chatWebSocket.send({ type: "join_room", data: { room_id: roomId } });
-      await new Promise((r) => setTimeout(r, 50));
+      const joined = await chatWebSocket.joinRoom(roomId, 2500);
+      if (!joined) {
+        // Join failed or not acknowledged; sending may be rejected by server.
+        set({ error: "Не удалось войти в чат. Попробуйте ещё раз." });
+        return null;
+      }
     }
 
     const payload: Record<string, unknown> = file
@@ -737,6 +744,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
         m.senderId === otherUserId ? { ...m, status: "read" as const } : m
       ),
     }));
+  },
+
+  removeChatByRoomId: (roomId: string) => {
+    const id = String(roomId || "");
+    if (!id) return;
+    set((s) => ({ chats: s.chats.filter((c) => String(c.id) !== id) }));
   },
 
   rejoinRoomIfNeeded: () => {

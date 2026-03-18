@@ -2,7 +2,7 @@
 
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   Send,
   Loader2,
@@ -16,6 +16,9 @@ import {
   Download,
   FileText,
   ArrowDown,
+  MoreVertical,
+  ArrowLeft,
+  Trash2,
 } from "lucide-react";
 import { AuthGuard } from "@/components/AuthGuard";
 import { Layout } from "@/components/Layout";
@@ -25,6 +28,8 @@ import { useAuthStore } from "@/stores/authStore";
 import { useChatStore, type ChatMessageFile, type ChatMessageContent, type ReplyTo } from "@/stores/chatStore";
 import { getDemoUsers } from "@/lib/storage";
 import { formatMessageTime, groupMessagesByDate, getMessagePreviewText, createImagePreview } from "@/utils/chatUtils";
+import { getValidAuthTokens } from "@/lib/validAuthToken";
+import { deleteRoom } from "@/services/chatRoomsApi";
 
 const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5 MB
 
@@ -459,6 +464,7 @@ function MessageBody({ content, isOwn }: { content: ChatMessageContent; isOwn: b
 }
 
 function ChatThreadContent() {
+  const router = useRouter();
   const searchParams = useSearchParams();
   const userId = searchParams.get("userId")?.trim() ?? null;
   const nameFromQuery = searchParams.get("name")?.trim() ?? null;
@@ -466,10 +472,12 @@ function ChatThreadContent() {
   const {
     activeChatMessages,
     activeChatUser,
+    activeRoomId,
     isMessagesLoading,
     error: messagesError,
     setActiveChat,
     clearActiveChat,
+    removeChatByRoomId,
     sendMessage,
     loadChats,
     loadUsers,
@@ -480,6 +488,9 @@ function ChatThreadContent() {
   const [replyingTo, setReplyingTo] = useState<ReplyTo | null>(null);
   const [attachModalOpen, setAttachModalOpen] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+  const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false);
+  const [isDeletingChat, setIsDeletingChat] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const didInitialScrollRef = useRef(false);
@@ -685,19 +696,71 @@ function ChatThreadContent() {
   const groups = groupMessagesByDate(activeChatMessages);
   const hasMessages = activeChatMessages.length > 0;
 
+  useEffect(() => {
+    if (!headerMenuOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setHeaderMenuOpen(false);
+    };
+    const onPointerDown = (e: PointerEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      // Close if click outside the menu/button.
+      if (!target.closest("[data-header-menu-root]")) {
+        setHeaderMenuOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("pointerdown", onPointerDown);
+    };
+  }, [headerMenuOpen]);
+
+  const handleDeleteChat = async () => {
+    if (!activeRoomId) return;
+    if (isDeletingChat) return;
+    setIsDeletingChat(true);
+    try {
+      const tokens = await getValidAuthTokens();
+      if (!tokens?.access_token) return;
+      await deleteRoom(tokens.access_token, activeRoomId);
+      removeChatByRoomId(activeRoomId);
+      clearActiveChat();
+      router.push("/");
+    } catch (e) {
+      console.warn("deleteRoom failed:", e);
+    } finally {
+      setIsDeletingChat(false);
+      setDeleteModalOpen(false);
+    }
+  };
+
   return (
     <AuthGuard requireAuth>
       <Layout>
         <div className="flex h-full min-h-0 flex-col overflow-hidden relative">
-          <header className="absolute w-full top-0 z-30 overflow-hidden border-b border-white/10 bg-background/35 backdrop-blur-xl shadow-[0_10px_30px_-20px_rgba(0,0,0,0.6)]">
-            <div className="pointer-events-none absolute inset-0">
-              <div className="absolute inset-0 bg-gradient-to-b from-background/10 via-background/0 to-background/40" />
-              <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/25 to-transparent" />
-              <div className="absolute -top-28 left-6 h-72 w-72 rounded-full bg-primary/18 blur-3xl" />
-              <div className="absolute -top-24 right-10 h-64 w-64 rounded-full bg-white/12 blur-3xl" />
-              <div className="absolute -bottom-24 left-1/2 h-56 w-56 -translate-x-1/2 rounded-full bg-primary/10 blur-3xl" />
+          <header className="absolute w-full top-0 z-30 border-b border-white/10 bg-background/35 backdrop-blur-xl shadow-[0_10px_30px_-20px_rgba(0,0,0,0.6)] overflow-visible">
+            <div className="absolute inset-0 overflow-hidden">
+              <div className="pointer-events-none absolute inset-0">
+                <div className="absolute inset-0 bg-gradient-to-b from-background/10 via-background/0 to-background/40" />
+                <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/25 to-transparent" />
+                <div className="absolute -top-28 left-6 h-72 w-72 rounded-full bg-primary/18 blur-3xl" />
+                <div className="absolute -top-24 right-10 h-64 w-64 rounded-full bg-white/12 blur-3xl" />
+                <div className="absolute -bottom-24 left-1/2 h-56 w-56 -translate-x-1/2 rounded-full bg-primary/10 blur-3xl" />
+              </div>
             </div>
             <div className="relative flex items-center gap-3 px-4 py-3">
+              <button
+                type="button"
+                onClick={() => router.back()}
+                className="shrink-0 rounded-full p-2 text-muted-foreground hover:bg-white/10 hover:text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
+                aria-label="Назад"
+                title="Назад"
+              >
+                <ArrowLeft className="h-5 w-5" />
+              </button>
+
               <div className="relative shrink-0">
                 <div className="absolute -inset-0.5 rounded-full bg-gradient-to-br from-primary/45 via-primary/15 to-transparent blur-md" />
                 <div className="relative h-10 w-10 overflow-hidden rounded-full border border-white/20 bg-white/10 shadow-sm">
@@ -726,8 +789,83 @@ function ChatThreadContent() {
                   <span className="truncate">E2E</span>
                 </div>
               </div>
+
+              <div className="relative shrink-0" data-header-menu-root>
+                <button
+                  type="button"
+                  onClick={() => setHeaderMenuOpen((v) => !v)}
+                  className="rounded-full p-2 text-muted-foreground hover:bg-white/10 hover:text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
+                  aria-label="Меню"
+                  title="Меню"
+                  aria-expanded={headerMenuOpen}
+                  aria-haspopup="menu"
+                >
+                  <MoreVertical className="h-5 w-5" />
+                </button>
+
+                {headerMenuOpen ? (
+                  <div
+                    role="menu"
+                    className="absolute right-0 mt-2 w-44 overflow-hidden rounded-xl border border-white/15 bg-background/70 backdrop-blur-xl shadow-xl"
+                  >
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setHeaderMenuOpen(false);
+                        setDeleteModalOpen(true);
+                      }}
+                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-destructive hover:bg-white/10 focus:outline-none focus:bg-white/10"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                      Удалить чат
+                    </button>
+                  </div>
+                ) : null}
+              </div>
             </div>
           </header>
+
+          {deleteModalOpen ? (
+            <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+              <div
+                className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+                onClick={() => setDeleteModalOpen(false)}
+              />
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-label="Удалить чат"
+                className="relative w-full max-w-sm rounded-2xl border border-white/15 bg-background/70 backdrop-blur-xl shadow-xl p-4"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <p className="text-sm font-semibold text-foreground">Удалить чат?</p>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Данные чата будут удалены для обоих участников.
+                </p>
+
+                <div className="mt-4 flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setDeleteModalOpen(false)}
+                    className="rounded-xl px-3 py-2 text-sm text-muted-foreground hover:bg-white/10 hover:text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    aria-label="Оставить"
+                  >
+                    Оставить
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleDeleteChat()}
+                    disabled={isDeletingChat}
+                    className="rounded-xl bg-destructive px-3 py-2 text-sm text-destructive-foreground disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-destructive/50"
+                    aria-label="Удалить"
+                  >
+                    {isDeletingChat ? "Удаляю..." : "Удалить"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : null}
 
           <div className="relative flex-1 min-h-0 overflow-hidden">
             

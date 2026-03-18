@@ -35,6 +35,7 @@ class ChatWebSocketClient {
   private listeners = new Set<ChatWebSocketListener>();
   private url: string | null = null;
   private callbacks: ChatWebSocketCallbacks = {};
+  private pendingRoomJoins = new Map<string, { resolve: () => void; reject: () => void; t: number }>();
 
   connect(userId: string, accessToken: string, callbacks?: ChatWebSocketCallbacks): void {
     const newUrl = getWebSocketUrl(userId, accessToken);
@@ -53,6 +54,18 @@ class ChatWebSocketClient {
     this.ws.onmessage = (event: MessageEvent) => {
       try {
         const message = JSON.parse(event.data) as ChatWebSocketMessage;
+        if (message.type === "room_joined") {
+          const data = message.data as { room_id?: string } | undefined;
+          const roomId = data?.room_id;
+          if (roomId) {
+            const pending = this.pendingRoomJoins.get(String(roomId));
+            if (pending) {
+              clearTimeout(pending.t);
+              this.pendingRoomJoins.delete(String(roomId));
+              pending.resolve();
+            }
+          }
+        }
         this.listeners.forEach((cb) => cb(message));
       } catch (e) {
         console.warn("[Chat WS] parse error", e);
@@ -111,6 +124,36 @@ class ChatWebSocketClient {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(data));
     }
+  }
+
+  /** Отправить join_room и дождаться room_joined. */
+  joinRoom(roomId: string, timeoutMs = 2000): Promise<boolean> {
+    if (!roomId) return Promise.resolve(false);
+    if (this.ws?.readyState !== WebSocket.OPEN) return Promise.resolve(false);
+
+    // If already waiting - keep the existing promise semantics by replacing.
+    const prev = this.pendingRoomJoins.get(roomId);
+    if (prev) {
+      clearTimeout(prev.t);
+      this.pendingRoomJoins.delete(roomId);
+      prev.reject();
+    }
+
+    return new Promise((resolve) => {
+      const t = window.setTimeout(() => {
+        const pending = this.pendingRoomJoins.get(roomId);
+        if (pending) this.pendingRoomJoins.delete(roomId);
+        resolve(false);
+      }, Math.max(200, timeoutMs));
+
+      this.pendingRoomJoins.set(roomId, {
+        resolve: () => resolve(true),
+        reject: () => resolve(false),
+        t,
+      });
+
+      this.send({ type: "join_room", data: { room_id: roomId } });
+    });
   }
 }
 
