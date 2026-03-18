@@ -8,6 +8,25 @@ import { useAuthStore } from "@/stores/authStore";
 
 type Step = 1 | 2;
 
+const MIN_PASSWORD_LENGTH = 8;
+const SIMPLE_PASSWORDS = ["password", "password1", "12345678", "qwerty123", "qwerty", "abc12345", "admin123"];
+
+function validatePassword(p: string): { valid: boolean; hasLength: boolean; hasUpper: boolean; hasLower: boolean; hasDigit: boolean; notSimple: boolean } {
+  const hasLength = p.length >= MIN_PASSWORD_LENGTH;
+  const hasUpper = /[A-Z]/.test(p);
+  const hasLower = /[a-z]/.test(p);
+  const hasDigit = /\d/.test(p);
+  const notSimple = !SIMPLE_PASSWORDS.includes(p.toLowerCase());
+  return {
+    valid: hasLength && hasUpper && hasLower && hasDigit && notSimple,
+    hasLength,
+    hasUpper,
+    hasLower,
+    hasDigit,
+    notSimple,
+  };
+}
+
 export default function RegisterPage() {
   const router = useRouter();
   const { isAuthenticated, register, isLoading, error, clearError, initialize } = useAuthStore();
@@ -48,10 +67,12 @@ export default function RegisterPage() {
     setStep(2);
   };
 
+  const passwordValidation = validatePassword(password);
   const canSubmitStep2 =
     username.trim() &&
     password.trim() &&
-    password === confirmPassword;
+    password === confirmPassword &&
+    passwordValidation.valid;
 
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -80,8 +101,8 @@ export default function RegisterPage() {
   }
 
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center p-6 bg-background">
-      <div className="w-full max-w-sm space-y-6">
+    <div className="min-h-screen flex flex-col bg-background">
+      <div className="shrink-0 p-4">
         {step === 1 ? (
           <Link
             href="/auth/"
@@ -100,7 +121,9 @@ export default function RegisterPage() {
             Назад
           </button>
         )}
-
+      </div>
+      <div className="flex-1 flex flex-col items-center justify-center p-6">
+        <div className="w-full max-w-sm space-y-6">
         <div className="text-center">
           <div className="inline-flex w-16 h-16 rounded-2xl bg-primary/15 text-primary items-center justify-center mb-4">
             <MessageCircle size={32} />
@@ -198,7 +221,7 @@ export default function RegisterPage() {
                 autoComplete="username"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                placeholder="john_doe"
+                placeholder="Введите логин"
                 required
                 className="w-full rounded-xl border border-border bg-background px-4 py-3 text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary"
               />
@@ -217,6 +240,25 @@ export default function RegisterPage() {
                 required
                 className="w-full rounded-xl border border-border bg-background px-4 py-3 text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary"
               />
+              {password && (
+                <ul className="mt-2 space-y-1 text-xs text-muted-foreground">
+                  <li className={passwordValidation.hasLength ? "text-green-600 dark:text-green-400" : ""}>
+                    {passwordValidation.hasLength ? "✓" : "○"} Минимум {MIN_PASSWORD_LENGTH} символов
+                  </li>
+                  <li className={passwordValidation.hasUpper ? "text-green-600 dark:text-green-400" : ""}>
+                    {passwordValidation.hasUpper ? "✓" : "○"} Заглавные буква
+                  </li>
+                  <li className={passwordValidation.hasLower ? "text-green-600 dark:text-green-400" : ""}>
+                    {passwordValidation.hasLower ? "✓" : "○"} Строчные буква
+                  </li>
+                  <li className={passwordValidation.hasDigit ? "text-green-600 dark:text-green-400" : ""}>
+                    {passwordValidation.hasDigit ? "✓" : "○"} Цифры
+                  </li>
+                  <li className={passwordValidation.notSimple ? "text-green-600 dark:text-green-400" : ""}>
+                    {passwordValidation.notSimple ? "✓" : "○"} Не слишком простой пароль
+                  </li>
+                </ul>
+              )}
             </div>
             <div>
               <label htmlFor="confirmPassword" className="block text-sm font-medium text-foreground mb-1">
@@ -259,6 +301,7 @@ export default function RegisterPage() {
             Войти
           </Link>
         </p>
+        </div>
       </div>
     </div>
   );

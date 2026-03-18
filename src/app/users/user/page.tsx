@@ -7,9 +7,8 @@ import { ArrowLeft, MessageCircle, Loader2 } from "lucide-react";
 import { AuthGuard } from "@/components/AuthGuard";
 import { Layout } from "@/components/Layout";
 import { useAuthStore } from "@/stores/authStore";
-import { getAuthTokens } from "@/lib/secureStorage";
+import { getValidAuthTokens } from "@/lib/validAuthToken";
 import { getUserById } from "@/services/chatUsersApi";
-import { createRoom } from "@/services/chatRoomsApi";
 import type { UserSearchItem } from "@/services/chatUsersApi";
 
 function getInitials(name: string): string {
@@ -32,8 +31,6 @@ function UserProfileContent() {
   const [profile, setProfile] = useState<UserSearchItem | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [creating, setCreating] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!userId) {
@@ -45,7 +42,7 @@ function UserProfileContent() {
     setLoading(true);
     setLoadError(null);
     (async () => {
-      const tokens = await getAuthTokens();
+      const tokens = await getValidAuthTokens();
       if (!tokens?.access_token) {
         if (!cancelled) setLoadError("Нет доступа");
         return;
@@ -73,23 +70,9 @@ function UserProfileContent() {
     profile?.name?.trim() ||
     (userId ? `Пользователь ${String(userId).slice(0, 8)}` : "Пользователь");
 
-  const handleWriteMessage = async () => {
-    if (!userId || !user) return;
-    const tokens = await getAuthTokens();
-    if (!tokens?.access_token) {
-      setError("Нет доступа");
-      return;
-    }
-    setCreating(true);
-    setError(null);
-    try {
-      await createRoom(tokens.access_token, userId);
-      router.push(`/chat?userId=${encodeURIComponent(userId)}&name=${encodeURIComponent(displayName)}`);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Не удалось создать чат");
-    } finally {
-      setCreating(false);
-    }
+  const handleWriteMessage = () => {
+    if (!userId) return;
+    router.push(`/chat?userId=${encodeURIComponent(userId)}&name=${encodeURIComponent(displayName)}`);
   };
 
   return (
@@ -140,29 +123,13 @@ function UserProfileContent() {
                   </p>
                 </div>
 
-                {error && (
-                  <div className="mb-4 p-4 rounded-xl bg-destructive/10 text-destructive text-sm">
-                    {error}
-                  </div>
-                )}
-
                 <button
                   type="button"
                   onClick={handleWriteMessage}
-                  disabled={creating}
-                  className="w-full flex items-center justify-center gap-2 py-4 rounded-xl bg-primary text-primary-foreground font-medium hover:enabled:bg-primary/90 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-primary/50"
+                  className="w-full flex items-center justify-center gap-2 py-4 rounded-xl bg-primary text-primary-foreground font-medium hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-primary/50"
                 >
-                  {creating ? (
-                    <>
-                      <Loader2 size={22} className="animate-spin" />
-                      Создание чата...
-                    </>
-                  ) : (
-                    <>
-                      <MessageCircle size={22} />
-                      Написать сообщение
-                    </>
-                  )}
+                  <MessageCircle size={22} />
+                  Написать сообщение
                 </button>
               </>
             )}

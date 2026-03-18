@@ -37,12 +37,12 @@ class ChatWebSocketClient {
   private callbacks: ChatWebSocketCallbacks = {};
 
   connect(userId: string, accessToken: string, callbacks?: ChatWebSocketCallbacks): void {
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      if (this.url === getWebSocketUrl(userId, accessToken)) return;
-      this.disconnect();
-    }
+    const newUrl = getWebSocketUrl(userId, accessToken);
+    if (this.ws?.readyState === WebSocket.OPEN && this.url === newUrl) return;
+
+    this.disconnect();
     this.callbacks = callbacks ?? {};
-    this.url = getWebSocketUrl(userId, accessToken);
+    this.url = newUrl;
     this.ws = new WebSocket(this.url);
 
     this.ws.onopen = () => {
@@ -81,6 +81,25 @@ class ChatWebSocketClient {
 
   isConnected(): boolean {
     return this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  /** Ждать подключения до timeoutMs. Возвращает true, если подключились, false по таймауту. */
+  waitUntilConnected(timeoutMs: number): Promise<boolean> {
+    if (this.ws?.readyState === WebSocket.OPEN) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const deadline = Date.now() + timeoutMs;
+      const t = setInterval(() => {
+        if (this.ws?.readyState === WebSocket.OPEN) {
+          clearInterval(t);
+          resolve(true);
+          return;
+        }
+        if (Date.now() >= deadline) {
+          clearInterval(t);
+          resolve(false);
+        }
+      }, 100);
+    });
   }
 
   onMessage(cb: ChatWebSocketListener): () => void {

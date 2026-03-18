@@ -1,16 +1,19 @@
 "use client";
 
 import { create } from "zustand";
+import { getValidAuthTokens } from "@/lib/validAuthToken";
 import {
   getAuth,
-  getAuthTokens,
+  getChatKeys,
   setAuthWithTokens,
+  setChatKeys,
   clearAuthData,
   getChatKeysForUser,
   setChatKeysForUser,
   type StoredUser,
 } from "@/lib/secureStorage";
 import { chatAuthApi, ChatAuthApiError } from "@/services/chatAuthApi";
+import { getMyKeypair } from "@/services/chatKeysApi";
 
 export interface RegisterData {
   username: string;
@@ -42,17 +45,28 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   initialize: async () => {
     set({ isLoading: true, error: null });
     try {
-      const [user, tokens] = await Promise.all([getAuth(), getAuthTokens()]);
+      const [user, tokens] = await Promise.all([getAuth(), getValidAuthTokens()]);
       if (user && tokens?.access_token) {
-        if (tokens.refresh_token) {
+        // Восстановить ключи чата: из локального хранилища по user_id или с сервера (вход с любого устройства)
+        let sessionKeys = await getChatKeys();
+        if (!sessionKeys?.private_key && user?.id) {
+          const userKeys = await getChatKeysForUser(user.id);
+          if (userKeys?.private_key) {
+            await setChatKeys(userKeys);
+            sessionKeys = userKeys;
+          }
+        }
+        if (!sessionKeys?.private_key && tokens?.access_token) {
           try {
-            const refreshed = await chatAuthApi.refresh(tokens.refresh_token);
-            await setAuthWithTokens(user, {
-              access_token: refreshed.access_token,
-              refresh_token: refreshed.refresh_token,
-            });
+            const keypair = await getMyKeypair(tokens.access_token);
+            const keys = {
+              public_key: keypair.public_key,
+              private_key: keypair.private_key,
+            };
+            await setChatKeys(keys);
+            await setChatKeysForUser(user.id, keys);
           } catch {
-            // Refresh failed — keep existing tokens, don't clear session
+            // Нет ключей на сервере (пользователь без ключевой пары) — не блокируем вход
           }
         }
         set({
@@ -77,7 +91,19 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         id: String(res.user_id),
         name: res.username,
       };
-      const keys = await getChatKeysForUser(String(res.user_id));
+      let keys = await getChatKeysForUser(String(res.user_id));
+      if (!keys?.private_key) {
+        try {
+          const keypair = await getMyKeypair(res.access_token);
+          keys = {
+            public_key: keypair.public_key,
+            private_key: keypair.private_key,
+          };
+          await setChatKeysForUser(String(res.user_id), keys);
+        } catch {
+          // Ключей на сервере нет (старый пользователь без ключей) — вход без чата
+        }
+      }
       await setAuthWithTokens(
         user,
         {

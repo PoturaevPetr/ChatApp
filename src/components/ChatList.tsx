@@ -41,18 +41,22 @@ export function ChatList() {
   const isEmpty = !isLoading && sorted.length === 0;
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full position-relative">
+      <div className="absolute bottom-5 right-2 border rounded-full p-2 bg-primary/60 text-white">
+        <button
+          type="button"
+          onClick={() => setStartChatOpen(true)}
+          className="p-2 rounded-lg hover:bg-muted hover:text-foreground"
+          aria-label="Новый чат"
+        >
+          <Pencil size={20} />
+        </button>
+      </div>
+
       <div className="p-4 border-b border-border space-y-3">
         <div className="flex items-center justify-between">
           <h1 className="text-xl font-semibold text-foreground">Чаты</h1>
-          <button
-            type="button"
-            onClick={() => setStartChatOpen(true)}
-            className="p-2 rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground"
-            aria-label="Новый чат"
-          >
-            <Pencil size={20} />
-          </button>
+
         </div>
         <div className="relative">
           <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />

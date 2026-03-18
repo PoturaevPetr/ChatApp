@@ -23,9 +23,64 @@ export function formatChatDate(timestamp: string): string {
   }
 }
 
-export function getMessagePreviewText(content: { type: string; text?: string } | string, maxLength = 50): string {
-  const text = typeof content === "string" ? content : content?.type === "text" ? content.text ?? "" : "";
+export function getMessagePreviewText(
+  content: { type: string; text?: string; file?: { name: string; mimeType?: string } } | string,
+  maxLength = 50
+): string {
+  if (typeof content === "string") return content.length <= maxLength ? content : content.slice(0, maxLength) + "...";
+  if (content?.type === "file" && content.file) {
+    const mime = content.file.mimeType ?? "";
+    const name = content.file.name ?? "";
+    const lowerName = name.toLowerCase();
+
+    if (mime.startsWith("audio/")) return "Голосовое сообщение";
+    if (/\.(webm|ogg|opus|mp3|wav|m4a|aac|flac|amr)$/.test(lowerName)) return "Голосовое сообщение";
+
+    if (mime.startsWith("image/")) return "Изображение";
+    if (/\.(png|jpe?g|gif|webp|bmp|svg)$/.test(lowerName)) return "Изображение";
+
+    if (name) return `📎 ${name}`;
+  }
+  const text = content?.type === "text" ? content.text ?? "" : "";
   return text.length <= maxLength ? text : text.slice(0, maxLength) + "...";
+}
+
+const PREVIEW_MAX_SIZE = 120;
+
+/**
+ * Создаёт сжатое превью изображения из data URL (для быстрого отображения до загрузки полного).
+ */
+export function createImagePreview(dataUrl: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      try {
+        const canvas = document.createElement("canvas");
+        let { width, height } = img;
+        if (width > height && width > PREVIEW_MAX_SIZE) {
+          height = Math.round((height * PREVIEW_MAX_SIZE) / width);
+          width = PREVIEW_MAX_SIZE;
+        } else if (height > PREVIEW_MAX_SIZE) {
+          width = Math.round((width * PREVIEW_MAX_SIZE) / height);
+          height = PREVIEW_MAX_SIZE;
+        }
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          resolve(dataUrl);
+          return;
+        }
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL("image/jpeg", 0.8));
+      } catch {
+        resolve(dataUrl);
+      }
+    };
+    img.onerror = () => reject(new Error("Image load failed"));
+    img.src = dataUrl;
+  });
 }
 
 export function sortChatsWithUnreadFirst<T extends { unreadCount: number; updatedAt: string }>(chats: T[]): T[] {

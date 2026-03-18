@@ -18,6 +18,19 @@ export interface RoomUser {
   avatar?: string | null;
 }
 
+/** Последнее сообщение комнаты (превью в списке чатов). */
+export interface RoomLastMessage {
+  message_id: string;
+  sender_id: string;
+  recipient_id: string | null;
+  room_id: string | null;
+  encrypted_data: string;
+  encrypted_aes_key: string;
+  nonce: string;
+  sent_at: string;
+  is_read: boolean;
+}
+
 export interface Room {
   id: string;
   name: string;
@@ -25,6 +38,7 @@ export interface Room {
   created_at: string;
   created_by: string;
   users: RoomUser[];
+  last_message?: RoomLastMessage | null;
 }
 
 export interface CreateRoomResponse {
@@ -57,7 +71,7 @@ export async function getRooms(accessToken: string): Promise<Room[]> {
 
   const data = await res.json();
   if (!Array.isArray(data)) return [];
-  return data.map((r: { id?: string; name?: string; description?: string; created_at?: string; created_by?: string; users?: RoomUser[] }) => ({
+  return data.map((r: Room & { last_message?: RoomLastMessage | null }) => ({
     id: String(r.id ?? ""),
     name: r.name ?? "",
     description: r.description ?? "",
@@ -71,6 +85,7 @@ export async function getRooms(accessToken: string): Promise<Room[]> {
       birth_date: u.birth_date,
       avatar: u.avatar ?? null,
     })) : [],
+    last_message: r.last_message ?? null,
   }));
 }
 

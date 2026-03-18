@@ -49,8 +49,8 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center p-6 bg-background">
-      <div className="w-full max-w-sm space-y-6">
+    <div className="min-h-screen flex flex-col bg-background">
+      <div className="shrink-0 p-4">
         <Link
           href="/auth/"
           className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"
@@ -58,7 +58,9 @@ export default function LoginPage() {
           <ArrowLeft size={18} />
           Назад
         </Link>
-
+      </div>
+      <div className="flex-1 flex flex-col items-center justify-center p-6">
+        <div className="w-full max-w-sm space-y-6">
         <div className="text-center">
           <div className="inline-flex w-16 h-16 rounded-2xl bg-primary/15 text-primary items-center justify-center mb-4">
             <MessageCircle size={32} />
@@ -84,7 +86,7 @@ export default function LoginPage() {
               autoComplete="username"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              placeholder="john_doe"
+              placeholder="Введите логин"
               required
               className="w-full rounded-xl border border-border bg-background px-4 py-3 text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary"
             />
@@ -92,7 +94,7 @@ export default function LoginPage() {
 
           <div>
             <label htmlFor="password" className="block text-sm font-medium text-foreground mb-1">
-              Пароль (необязательно)
+              Пароль
             </label>
             <input
               id="password"
@@ -127,6 +129,7 @@ export default function LoginPage() {
             Зарегистрироваться
           </Link>
         </p>
+        </div>
       </div>
     </div>
   );

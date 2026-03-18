@@ -20,11 +20,15 @@ export interface StoredChatKeys {
   private_key: string;
 }
 
+export type StoredMessageContent =
+  | { type: "text"; text: string; reply_to?: { id: string; preview: string } }
+  | { type: "file"; text?: string; file: { name: string; mimeType: string; data: string }; reply_to?: { id: string; preview: string } };
+
 export interface StoredMessage {
   id: string;
   senderId: string;
   recipientId: string;
-  content: { type: "text"; text: string };
+  content: StoredMessageContent;
   timestamp: string;
   status: "sent" | "delivered" | "read";
 }

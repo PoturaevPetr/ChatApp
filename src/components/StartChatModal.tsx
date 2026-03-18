@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { X, Search, Loader2 } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
-import { getAuthTokens } from "@/lib/secureStorage";
+import { getValidAuthTokens } from "@/lib/validAuthToken";
 import { searchUsers, type UserSearchItem } from "@/services/chatUsersApi";
 
 function getInitials(name: string): string {
@@ -42,7 +42,7 @@ export function StartChatModal({ isOpen, onClose }: StartChatModalProps) {
   }, [isOpen]);
 
   const doSearch = useCallback(async () => {
-    const tokens = await getAuthTokens();
+    const tokens = await getValidAuthTokens();
     if (!tokens?.access_token) {
       setError("Нет доступа");
       setLoading(false);

@@ -52,6 +52,18 @@ export interface RefreshTokenResponse {
   refresh_token: string;
 }
 
+/** Ответ GET /auth/me — текущий пользователь */
+export interface MeResponse {
+  id?: string;
+  user_id?: string;
+  username?: string;
+  first_name?: string;
+  last_name?: string;
+  middle_name?: string;
+  birth_date?: string;
+  avatar?: string | null;
+}
+
 class ChatAuthApiError extends Error {
   constructor(
     message: string,
@@ -86,6 +98,20 @@ async function request<T>(path: string, options: { method: string; body?: Record
   return data as T;
 }
 
+async function authRequest<T>(path: string, accessToken: string): Promise<T> {
+  const url = `${BASE_URL.replace(/\/$/, "")}${path}`;
+  const res = await fetch(url, {
+    method: "GET",
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const data = await res.json().catch(() => ({}));
+  const detail = typeof (data as { detail?: string }).detail === "string" ? (data as { detail: string }).detail : undefined;
+  if (!res.ok) {
+    throw new ChatAuthApiError(detail || res.statusText || `HTTP ${res.status}`, res.status, detail);
+  }
+  return data as T;
+}
+
 export const chatAuthApi = {
   async register(data: Omit<RegisterRequest, "service_id" | "avatar">): Promise<RegisterResponse> {
     const body: RegisterRequest = {
@@ -110,6 +136,11 @@ export const chatAuthApi = {
       method: "POST",
       body: { refresh_token },
     });
+  },
+
+  /** Текущий пользователь. GET /auth/me */
+  async getMe(accessToken: string): Promise<MeResponse> {
+    return authRequest<MeResponse>("/api/v1/auth/me", accessToken);
   },
 };
 
