@@ -49,4 +49,12 @@
   .no-scrollbar::-webkit-scrollbar {
     display: none; /* Chrome, Safari and Opera */
   }
+
+  /**
+   * Доп. отступ снизу под системную панель (Android gesture bar, iPhone home indicator).
+   * Работает при viewportFit: cover в layout.tsx.
+   */
+  .pb-safe {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
 }

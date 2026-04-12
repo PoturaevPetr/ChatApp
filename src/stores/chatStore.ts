@@ -12,17 +12,41 @@ import {
   markThreadAsRead,
   getDemoUsers,
 } from "@/lib/storage";
+import {
+  prepareAttachmentForUpload,
+  base64ToBlob,
+  blobToDataURL,
+  dataUrlToBase64Payload,
+} from "@/lib/imageCompress";
+import { encryptAttachmentBytes } from "@/lib/fileCrypto";
+import { uploadRoomAttachments } from "@/services/chatAttachmentsApi";
+import { clearAttachmentMediaCache } from "@/lib/attachmentMediaCache";
 
 export interface ChatUser {
   id: string;
   name: string;
   avatar?: string | null;
+  /** ISO 8601 с сервера (GET user / список комнат). */
+  lastSeenAt?: string | null;
+  /** Локально по WebSocket user_online / user_offline (один воркер; без Redis может расходиться). */
+  isOnline?: boolean;
+}
+
+export interface ChatMessageFileRef {
+  attachment_id: string;
+  thumb_attachment_id?: string;
+  /** AES-GCM ключи для ciphertext в БД (попадают в E2E-шифруемое тело сообщения). */
+  full_key_b64: string;
+  full_nonce_b64: string;
+  thumb_key_b64?: string;
+  thumb_nonce_b64?: string;
 }
 
 export interface ChatMessageFile {
   name: string;
   mimeType: string;
-  data: string; // base64
+  data: string; // base64; пусто если загрузка по REST (file_ref)
+  file_ref?: ChatMessageFileRef;
 }
 
 /** Ссылка на сообщение, на которое отвечаем (хранится в теле сообщения, без изменений БД). */
@@ -43,6 +67,12 @@ export interface ChatMessage {
   timestamp: string;
   status: "sent" | "delivered" | "read";
   isOwn: boolean;
+  /** Локальный статус загрузки вложения (optimistic UI, не хранится на сервере). */
+  isUploading?: boolean;
+  /** 0..100, только локально для индикатора загрузки. */
+  uploadProgress?: number;
+  /** Локальная ошибка загрузки вложения. */
+  uploadError?: string | null;
 }
 
 export interface ChatListItem {
@@ -68,6 +98,70 @@ function displayNameForUserId(userId: string): string {
   return short ? `Пользователь ${short}` : "Пользователь";
 }
 
+/** Собирает контент сообщения из расшифрованного JSON (inline file, file_ref или текст). */
+export function buildMessageContentFromDecrypt(content: Record<string, unknown> | null | undefined): ChatMessageContent {
+  if (!content) return { type: "text", text: "" };
+  const text = typeof content.text === "string" ? content.text : "";
+  const rawReplyTo = content.reply_to as { id?: string; preview?: string } | undefined;
+  const replyTo: ReplyTo | undefined =
+    rawReplyTo && typeof rawReplyTo.id === "string" && typeof rawReplyTo.preview === "string"
+      ? { id: rawReplyTo.id, preview: rawReplyTo.preview }
+      : undefined;
+  const fr = content.file_ref as {
+    attachment_id?: string;
+    thumb_attachment_id?: string;
+    name?: string;
+    mimeType?: string;
+    full_key_b64?: string;
+    full_nonce_b64?: string;
+    thumb_key_b64?: string;
+    thumb_nonce_b64?: string;
+  } | undefined;
+  if (fr && typeof fr.attachment_id === "string" && fr.attachment_id.length > 0) {
+    const tid =
+      typeof fr.thumb_attachment_id === "string" && fr.thumb_attachment_id.length > 0
+        ? fr.thumb_attachment_id
+        : undefined;
+    const fk = typeof fr.full_key_b64 === "string" ? fr.full_key_b64 : "";
+    const fn = typeof fr.full_nonce_b64 === "string" ? fr.full_nonce_b64 : "";
+    const ref: ChatMessageFileRef = {
+      attachment_id: fr.attachment_id,
+      full_key_b64: fk,
+      full_nonce_b64: fn,
+    };
+    if (tid) ref.thumb_attachment_id = tid;
+    if (typeof fr.thumb_key_b64 === "string" && fr.thumb_key_b64.length > 0) ref.thumb_key_b64 = fr.thumb_key_b64;
+    if (typeof fr.thumb_nonce_b64 === "string" && fr.thumb_nonce_b64.length > 0)
+      ref.thumb_nonce_b64 = fr.thumb_nonce_b64;
+    return {
+      type: "file",
+      text: text || undefined,
+      file: {
+        name: typeof fr.name === "string" ? fr.name : "file",
+        mimeType: typeof fr.mimeType === "string" ? fr.mimeType : "application/octet-stream",
+        data: "",
+        file_ref: ref,
+      },
+      reply_to: replyTo,
+    };
+  }
+  const filePayload = content.file as { name?: string; mimeType?: string; data?: string } | undefined;
+  const hasFile = filePayload && typeof filePayload.name === "string" && typeof filePayload.data === "string";
+  if (hasFile) {
+    return {
+      type: "file",
+      text: text || undefined,
+      file: {
+        name: filePayload!.name ?? "file",
+        mimeType: typeof filePayload!.mimeType === "string" ? filePayload!.mimeType : "application/octet-stream",
+        data: filePayload!.data!,
+      },
+      reply_to: replyTo,
+    };
+  }
+  return { type: "text", text, reply_to: replyTo };
+}
+
 async function runLoadMessagesInner(
   currentUserId: string,
   otherUserId: string,
@@ -88,6 +182,7 @@ async function runLoadMessagesInner(
       0,
       false,
       roomId ?? undefined,
+      !silentRefresh && !!roomId,
     );
     const forThisChat = roomId
       ? apiMessages
@@ -140,26 +235,7 @@ async function runLoadMessagesInner(
           m.nonce!,
           keys.private_key,
         );
-        const text = content?.text ?? "";
-        const filePayload = content?.file as { name?: string; mimeType?: string; data?: string } | undefined;
-        const hasFile = filePayload && typeof filePayload.name === "string" && typeof filePayload.data === "string";
-        const rawReplyTo = content?.reply_to as { id?: string; preview?: string } | undefined;
-        const replyTo: ReplyTo | undefined =
-          rawReplyTo && typeof rawReplyTo.id === "string" && typeof rawReplyTo.preview === "string"
-            ? { id: rawReplyTo.id, preview: rawReplyTo.preview }
-            : undefined;
-        const messageContent: ChatMessageContent = hasFile
-          ? {
-              type: "file",
-              text: text || undefined,
-              file: {
-                name: filePayload!.name ?? "file",
-                mimeType: typeof filePayload!.mimeType === "string" ? filePayload!.mimeType : "application/octet-stream",
-                data: filePayload!.data!,
-              },
-              reply_to: replyTo,
-            }
-          : { type: "text", text, reply_to: replyTo };
+        const messageContent = buildMessageContentFromDecrypt(content as Record<string, unknown> | null);
         return {
           id: String(m.message_id),
           senderId: String(m.sender_id),
@@ -194,26 +270,7 @@ async function runLoadMessagesInner(
           keys!.private_key,
         ).then((content) => {
           if (!content || get().activeChatId !== loadedForThread) return;
-          const text = content?.text ?? "";
-          const filePayload = content?.file as { name?: string; mimeType?: string; data?: string } | undefined;
-          const hasFile = filePayload && typeof filePayload.name === "string" && typeof filePayload.data === "string";
-          const rawReplyTo = content?.reply_to as { id?: string; preview?: string } | undefined;
-          const replyTo: ReplyTo | undefined =
-            rawReplyTo && typeof rawReplyTo.id === "string" && typeof rawReplyTo.preview === "string"
-              ? { id: rawReplyTo.id, preview: rawReplyTo.preview }
-              : undefined;
-          const messageContent: ChatMessageContent = hasFile
-            ? {
-                type: "file",
-                text: text || undefined,
-                file: {
-                  name: filePayload!.name ?? "file",
-                  mimeType: typeof filePayload!.mimeType === "string" ? filePayload!.mimeType : "application/octet-stream",
-                  data: filePayload!.data!,
-                },
-                reply_to: replyTo,
-              }
-            : { type: "text", text, reply_to: replyTo };
+          const messageContent = buildMessageContentFromDecrypt(content as Record<string, unknown> | null);
           const updated: ChatMessage = {
             id: messageId,
             senderId: String(full.sender_id),
@@ -243,9 +300,16 @@ async function runLoadMessagesInner(
   }
 }
 
+export interface LoadChatsOptions {
+  /** Сбросить кэш и показать полный индикатор загрузки */
+  force?: boolean;
+}
+
 interface ChatState {
   users: ChatUser[];
   chats: ChatListItem[];
+  /** Для какого user.id последний раз успешно подгрузили список (stale-while-revalidate). */
+  chatsLoadedForUserId: string | null;
   activeChatId: string | null;
   activeRoomId: string | null;
   activeChatMessages: ChatMessage[];
@@ -255,7 +319,9 @@ interface ChatState {
   isSending: boolean;
   error: string | null;
   loadUsers: () => void;
-  loadChats: (currentUserId: string) => Promise<void>;
+  loadChats: (currentUserId: string, options?: LoadChatsOptions) => Promise<void>;
+  /** Сброс чата при выходе из аккаунта */
+  resetSession: () => void;
   loadMessages: (currentUserId: string, otherUserId: string, silentRefresh?: boolean) => Promise<void>;
   sendMessage: (
     currentUserId: string,
@@ -281,11 +347,18 @@ interface ChatState {
   rejoinRoomIfNeeded: () => void;
   /** Обновить только что отправленное сообщение серверными id и временем (из message_sent). */
   updateSentMessage: (messageId: string, sentAt: string) => void;
+  /** Событие message_read: собеседник прочитал наше сообщение — две галочки. */
+  markOwnMessageReadByPeer: (messageId: string) => void;
+  /** Убрать сообщение из активного треда и обновить превью в списке чатов (после DELETE на сервере или по WebSocket message_deleted). */
+  removeMessageFromActiveChat: (messageId: string) => void;
+  /** События user_online / user_offline для подписи «в сети» / last seen. */
+  updatePeerPresence: (userId: string, online: boolean, atIso?: string) => void;
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
   users: [],
   chats: [],
+  chatsLoadedForUserId: null,
   activeChatId: null,
   activeRoomId: null,
   activeChatMessages: [],
@@ -300,24 +373,58 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({ users: list });
   },
 
-  loadChats: async (currentUserId: string) => {
+  resetSession: () => {
+    loadChatsPromise = null;
+    loadMessagesPromise = null;
+    loadMessagesThreadId = null;
+    clearAttachmentMediaCache();
+    set({
+      users: [],
+      chats: [],
+      chatsLoadedForUserId: null,
+      activeChatId: null,
+      activeRoomId: null,
+      activeChatMessages: [],
+      activeChatUser: null,
+      isLoading: false,
+      isMessagesLoading: false,
+      isSending: false,
+      error: null,
+    });
+  },
+
+  loadChats: async (currentUserId: string, options?: LoadChatsOptions) => {
     if (loadChatsPromise) {
       await loadChatsPromise;
       return;
     }
+    const force = options?.force === true;
     loadChatsPromise = (async () => {
-      set({ isLoading: true, error: null });
+      const prevLoadedFor = get().chatsLoadedForUserId;
+      if (prevLoadedFor !== null && prevLoadedFor !== currentUserId) {
+        set({ chats: [], chatsLoadedForUserId: null });
+      }
+      const hasUsableCache =
+        !force &&
+        get().chatsLoadedForUserId === currentUserId &&
+        get().chats.length > 0;
+
+      if (!hasUsableCache) {
+        set({ isLoading: true, error: null });
+      } else {
+        set({ error: null, isLoading: false });
+      }
+
       try {
         const tokens = await getValidAuthTokens();
         if (!tokens?.access_token) {
-          set({ chats: [], isLoading: false });
+          set({ chats: [], chatsLoadedForUserId: null, isLoading: false });
           return;
         }
         const currentId = currentUserId.toLowerCase();
         const keys = await getChatKeys();
         const rooms = await getRooms(tokens.access_token);
         const prevChats = get().chats;
-        console.log(keys)
 
         const chatsWithLastMessage = await Promise.all(
           rooms.map(async (room): Promise<ChatListItem | null> => {
@@ -325,14 +432,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
             if (!other) return null;
             const parts = [other.last_name, other.first_name, other.middle_name].filter(Boolean) as string[];
             const displayName = parts.length > 0 ? parts.join(" ").trim() : (room.name || displayNameForUserId(other.id));
+            const prev = prevChats.find((c) => c.id === room.id || c.otherUser.id === other.id);
             const otherUser: ChatUser = {
               id: other.id,
               name: displayName,
               avatar: other.avatar ?? null,
+              lastSeenAt: other.last_seen_at ?? prev?.otherUser.lastSeenAt ?? null,
+              isOnline: prev?.otherUser.isOnline,
             };
-            const prev = prevChats.find((c) => c.id === room.id || c.otherUser.id === other.id);
             let lastMessage: ChatMessage | null = null;
             let updatedAt = room.created_at ?? new Date().toISOString();
+            const unreadCount = typeof (room as unknown as { unread_count?: unknown }).unread_count === "number" ? (room as unknown as { unread_count: number }).unread_count : 0;
             if (room.last_message && keys?.private_key) {
               const lm = room.last_message;
               const content = await decryptMessage(
@@ -341,17 +451,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 lm.nonce,
                 keys.private_key
               );
-              const text = content?.text ?? "";
-              const file = (content as { file?: { name?: string } })?.file;
-              const fileName = file && typeof file.name === "string" ? file.name : null;
-              const messageContent: ChatMessageContent =
-                fileName != null
-                  ? {
-                      type: "file",
-                      text: text || undefined,
-                      file: { name: fileName, mimeType: "application/octet-stream", data: "" },
-                    }
-                  : { type: "text", text };
+              const messageContent = buildMessageContentFromDecrypt(content as Record<string, unknown> | null);
               lastMessage = {
                 id: String(lm.message_id),
                 senderId: String(lm.sender_id),
@@ -367,7 +467,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               id: room.id,
               otherUser,
               lastMessage,
-              unreadCount: prev?.unreadCount ?? 0,
+              unreadCount,
               updatedAt,
             };
           })
@@ -377,7 +477,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           .filter((c): c is ChatListItem => c !== null)
           .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
 
-        set({ chats, isLoading: false, error: null });
+        set({ chats, isLoading: false, error: null, chatsLoadedForUserId: currentUserId });
 
         const activeUser = get().activeChatUser;
         if (activeUser) {
@@ -389,11 +489,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
         }
       } catch (e) {
-        set({
-          error: e instanceof Error ? e.message : "Не удалось загрузить чаты",
-          chats: [],
-          isLoading: false,
-        });
+        const hadCache =
+          get().chatsLoadedForUserId === currentUserId && get().chats.length > 0;
+        if (hadCache) {
+          set({
+            error: e instanceof Error ? e.message : "Не удалось обновить чаты",
+            isLoading: false,
+          });
+        } else {
+          set({
+            error: e instanceof Error ? e.message : "Не удалось загрузить чаты",
+            chats: [],
+            chatsLoadedForUserId: null,
+            isLoading: false,
+          });
+        }
       } finally {
         loadChatsPromise = null;
       }
@@ -464,7 +574,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
           error: null,
           activeChatUser:
             typeof otherUser === "object" && "id" in otherUser
-              ? { id: otherUser.id, name: otherUser.name, avatar: otherUser.avatar ?? null }
+              ? {
+                  id: otherUser.id,
+                  name: otherUser.name,
+                  avatar: otherUser.avatar ?? null,
+                  lastSeenAt: otherUser.lastSeenAt ?? null,
+                  isOnline: otherUser.isOnline,
+                }
               : { id: otherUserId, name: displayNameForUserId(otherUserId), avatar: null },
         });
         if (roomId && chatWebSocket.isConnected()) {
@@ -554,9 +670,157 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     }
 
-    const payload: Record<string, unknown> = file
-      ? { text: text || undefined, file: { name: file.name, mimeType: file.mimeType, data: file.data } }
-      : { text };
+    let payload: Record<string, unknown>;
+    let optimisticFileOverride: ChatMessageFile | undefined;
+    let optimisticUploadMessageId: string | null = null;
+
+    const setUploadState = (patch: Partial<ChatMessage>) => {
+      if (!optimisticUploadMessageId) return;
+      set((s) => ({
+        activeChatMessages: s.activeChatMessages.map((m) =>
+          m.id === optimisticUploadMessageId ? { ...m, ...patch } : m
+        ),
+      }));
+      const chats = get().chats;
+      const chatIdx = chats.findIndex((c) => c.lastMessage?.id === optimisticUploadMessageId);
+      if (chatIdx >= 0) {
+        const last = chats[chatIdx].lastMessage;
+        if (!last) return;
+        const updatedLast = { ...last, ...patch };
+        set({
+          chats: chats.map((c, i) => (i === chatIdx ? { ...c, lastMessage: updatedLast } : c)),
+        });
+      }
+    };
+
+    if (file && roomId) {
+      const tokens = await getValidAuthTokens();
+      if (!tokens?.access_token) {
+        set({ error: "Нет авторизации" });
+        return null;
+      }
+
+      // Показываем сообщение сразу, ещё до загрузки вложения на сервер.
+      const optimisticContent: ChatMessageContent = {
+        type: "file",
+        text: text || undefined,
+        file,
+        reply_to: replyTo,
+      };
+      const optimisticStored = appendMessage({
+        senderId: currentUserId,
+        recipientId,
+        content: optimisticContent,
+      });
+      const optimisticChatMessage: ChatMessage = {
+        id: optimisticStored.id,
+        senderId: optimisticStored.senderId,
+        recipientId: optimisticStored.recipientId,
+        content: optimisticStored.content as ChatMessageContent,
+        timestamp: optimisticStored.timestamp,
+        status: optimisticStored.status,
+        isOwn: true,
+        isUploading: true,
+        uploadProgress: 5,
+        uploadError: null,
+      };
+      optimisticUploadMessageId = optimisticChatMessage.id;
+      set((s) => ({
+        activeChatMessages: [...s.activeChatMessages, optimisticChatMessage],
+      }));
+
+      // Сразу поднимаем текущий чат наверх и показываем optimistic lastMessage.
+      const now = new Date().toISOString();
+      const chatsBefore = get().chats;
+      const chatIdxBefore = chatsBefore.findIndex(
+        (c) => c.id === roomId || c.otherUser.id === recipientId
+      );
+      if (chatIdxBefore >= 0) {
+        const chat = chatsBefore[chatIdxBefore];
+        const updated: ChatListItem = { ...chat, lastMessage: optimisticChatMessage, updatedAt: now };
+        const rest = chatsBefore.filter((_, i) => i !== chatIdxBefore);
+        const reordered = [updated, ...rest.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())];
+        set({ chats: reordered });
+      } else if (state.activeChatUser && state.activeChatUser.id === recipientId) {
+        const newChat: ChatListItem = {
+          id: roomId!,
+          otherUser: state.activeChatUser,
+          lastMessage: optimisticChatMessage,
+          unreadCount: 0,
+          updatedAt: now,
+        };
+        const reordered = [newChat, ...chatsBefore.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())];
+        set({ chats: reordered });
+      }
+
+      try {
+        setUploadState({ uploadProgress: 15, uploadError: null });
+        const inputBlob = base64ToBlob(file.data, file.mimeType);
+        const prep = await prepareAttachmentForUpload(new File([inputBlob], file.name, { type: file.mimeType }));
+        setUploadState({ uploadProgress: 35 });
+        const encFull = await encryptAttachmentBytes(await prep.full.arrayBuffer());
+        const encThumb = prep.thumb ? await encryptAttachmentBytes(await prep.thumb.arrayBuffer()) : null;
+        setUploadState({ uploadProgress: 60 });
+        const uploaded = await uploadRoomAttachments(
+          tokens.access_token,
+          roomId,
+          new Blob([new Uint8Array(encFull.ciphertext)]),
+          `${prep.name}.enc`,
+          "application/octet-stream",
+          encThumb ? new Blob([new Uint8Array(encThumb.ciphertext)]) : null,
+          "thumb.enc",
+        );
+        setUploadState({ uploadProgress: 85 });
+        const fullDataUrl = await blobToDataURL(prep.full);
+        let b64 = "";
+        try {
+          b64 = dataUrlToBase64Payload(fullDataUrl);
+        } catch {
+          b64 = "";
+        }
+        const ref: ChatMessageFileRef = {
+          attachment_id: uploaded.attachment_id,
+          full_key_b64: encFull.key_b64,
+          full_nonce_b64: encFull.nonce_b64,
+        };
+        if (uploaded.thumbnail_attachment_id && encThumb) {
+          ref.thumb_attachment_id = uploaded.thumbnail_attachment_id;
+          ref.thumb_key_b64 = encThumb.key_b64;
+          ref.thumb_nonce_b64 = encThumb.nonce_b64;
+        }
+        optimisticFileOverride = {
+          name: prep.name,
+          mimeType: prep.mimeType,
+          data: b64,
+          file_ref: ref,
+        };
+        payload = {
+          text: text || undefined,
+          file_ref: {
+            attachment_id: uploaded.attachment_id,
+            thumb_attachment_id: uploaded.thumbnail_attachment_id || undefined,
+            name: prep.name,
+            mimeType: prep.mimeType,
+            full_key_b64: encFull.key_b64,
+            full_nonce_b64: encFull.nonce_b64,
+            thumb_key_b64: encThumb?.key_b64,
+            thumb_nonce_b64: encThumb?.nonce_b64,
+          },
+        };
+      } catch (e) {
+        setUploadState({
+          isUploading: false,
+          uploadProgress: undefined,
+          uploadError: e instanceof Error ? e.message : "Не удалось загрузить файл",
+        });
+        set({ error: e instanceof Error ? e.message : "Не удалось загрузить файл" });
+        return null;
+      }
+    } else if (file) {
+      payload = { text: text || undefined, file: { name: file.name, mimeType: file.mimeType, data: file.data } };
+    } else {
+      payload = { text };
+    }
     if (replyTo) payload.reply_to = { id: replyTo.id, preview: replyTo.preview };
 
     if (roomId && chatWebSocket.isConnected()) {
@@ -573,25 +837,56 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     const content: ChatMessageContent = file
-      ? { type: "file", text: text || undefined, file, reply_to: replyTo }
+      ? {
+          type: "file",
+          text: text || undefined,
+          file: optimisticFileOverride ?? file,
+          reply_to: replyTo,
+        }
       : { type: "text", text, reply_to: replyTo };
-    const newMsg = appendMessage({
-      senderId: currentUserId,
-      recipientId,
-      content,
-    });
-    const chatMessage: ChatMessage = {
-      id: newMsg.id,
-      senderId: newMsg.senderId,
-      recipientId: newMsg.recipientId,
-      content: newMsg.content as ChatMessageContent,
-      timestamp: newMsg.timestamp,
-      status: newMsg.status,
-      isOwn: true,
-    };
-    set((s) => ({
-      activeChatMessages: [...s.activeChatMessages, chatMessage],
-    }));
+
+    let chatMessage: ChatMessage;
+    if (file && optimisticUploadMessageId) {
+      // Не добавляем второй раз: обновляем уже показанное optimistic-сообщение.
+      const existing = get().activeChatMessages.find((m) => m.id === optimisticUploadMessageId);
+      chatMessage = {
+        ...(existing ?? {
+          id: optimisticUploadMessageId,
+          senderId: currentUserId,
+          recipientId,
+          timestamp: new Date().toISOString(),
+          status: "sent" as const,
+          isOwn: true,
+        }),
+        content,
+        isUploading: false,
+        uploadProgress: undefined,
+        uploadError: null,
+      };
+      set((s) => ({
+        activeChatMessages: s.activeChatMessages.map((m) =>
+          m.id === optimisticUploadMessageId ? chatMessage : m
+        ),
+      }));
+    } else {
+      const newMsg = appendMessage({
+        senderId: currentUserId,
+        recipientId,
+        content,
+      });
+      chatMessage = {
+        id: newMsg.id,
+        senderId: newMsg.senderId,
+        recipientId: newMsg.recipientId,
+        content: newMsg.content as ChatMessageContent,
+        timestamp: newMsg.timestamp,
+        status: newMsg.status,
+        isOwn: true,
+      };
+      set((s) => ({
+        activeChatMessages: [...s.activeChatMessages, chatMessage],
+      }));
+    }
 
     // Сразу поднимаем текущий чат наверх и обновляем lastMessage без запроса к API
     const now = new Date().toISOString();
@@ -673,34 +968,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
         keys.private_key,
       );
       if (!content) return;
-      const text = content?.text ?? "";
-      const filePayload = content?.file as { name?: string; mimeType?: string; data?: string } | undefined;
-      const hasFile = filePayload && typeof filePayload.name === "string" && typeof filePayload.data === "string";
-      const rawReplyTo = content?.reply_to as { id?: string; preview?: string } | undefined;
-      const replyTo: ReplyTo | undefined =
-        rawReplyTo && typeof rawReplyTo.id === "string" && typeof rawReplyTo.preview === "string"
-          ? { id: rawReplyTo.id, preview: rawReplyTo.preview }
-          : undefined;
-      const messageContent: ChatMessageContent = hasFile
-        ? {
-            type: "file",
-            text: text || undefined,
-            file: {
-              name: filePayload!.name ?? "file",
-              mimeType: typeof filePayload!.mimeType === "string" ? filePayload!.mimeType : "application/octet-stream",
-              data: filePayload!.data!,
-            },
-            reply_to: replyTo,
-          }
-        : { type: "text", text, reply_to: replyTo };
+      const messageContent = buildMessageContentFromDecrypt(content as Record<string, unknown> | null);
+      const isOwnMsg = String(full.sender_id).toLowerCase() === me;
       const newMsg: ChatMessage = {
         id: messageId,
         senderId: String(full.sender_id),
         recipientId: full.recipient_id ?? "",
         content: messageContent,
         timestamp: full.sent_at,
-        status: "delivered",
-        isOwn: String(full.sender_id).toLowerCase() === me,
+        status: full.is_read ? "read" : "delivered",
+        isOwn: isOwnMsg,
       };
 
       const chatState = get();
@@ -771,19 +1048,91 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
     if (idx === -1) return;
     const prev = list[idx];
-    const updated = { ...prev, id: messageId, timestamp: sentAt };
+    const nextStatus: ChatMessage["status"] = prev.status === "read" ? "read" : "delivered";
+    const updated: ChatMessage = { ...prev, id: messageId, timestamp: sentAt, status: nextStatus };
     set({
       activeChatMessages: list.map((msg, i) => (i === idx ? updated : msg)),
     });
     const chats = get().chats;
     const chatIdx = chats.findIndex((c) => c.lastMessage?.id === prev.id);
     if (chatIdx >= 0) {
-      const chat = chats[chatIdx];
+      const lm = chats[chatIdx].lastMessage;
       set({
-        chats: chats.map((c, i) =>
-          i === chatIdx ? { ...c, lastMessage: { ...c.lastMessage!, id: messageId, timestamp: sentAt } } : c
-        ),
+        chats: chats.map((c, i) => {
+          if (i !== chatIdx || !lm) return c;
+          const nextStatus: ChatMessage["status"] =
+            lm.isOwn && lm.status !== "read" ? "delivered" : lm.status;
+          return {
+            ...c,
+            lastMessage: { ...lm, id: messageId, timestamp: sentAt, status: nextStatus },
+          };
+        }),
       });
     }
+  },
+
+  markOwnMessageReadByPeer: (messageId: string) => {
+    const id = String(messageId || "");
+    if (!id) return;
+    set((s) => ({
+      activeChatMessages: s.activeChatMessages.map((m) =>
+        m.id === id && m.isOwn ? { ...m, status: "read" as const } : m
+      ),
+      chats: s.chats.map((c) => {
+        const lm = c.lastMessage;
+        if (lm && lm.id === id && lm.isOwn) {
+          return { ...c, lastMessage: { ...lm, status: "read" as const } };
+        }
+        return c;
+      }),
+    }));
+  },
+
+  removeMessageFromActiveChat: (messageId: string) => {
+    const id = String(messageId || "");
+    if (!id) return;
+    set((s) => {
+      const nextMsgs = s.activeChatMessages.filter((m) => m.id !== id);
+      const latest =
+        nextMsgs.length === 0
+          ? null
+          : [...nextMsgs].sort(
+              (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
+            )[0];
+      const chats = s.chats.map((c) => {
+        if (c.lastMessage?.id !== id) return c;
+        return {
+          ...c,
+          lastMessage: latest,
+          updatedAt: latest?.timestamp ?? c.updatedAt,
+        };
+      });
+      return { activeChatMessages: nextMsgs, chats };
+    });
+  },
+
+  updatePeerPresence: (userId: string, online: boolean, atIso?: string) => {
+    const idLower = userId.trim().toLowerCase();
+    if (!idLower) return;
+    set((s) => {
+      const patchUser = (u: ChatUser): ChatUser => ({
+        ...u,
+        isOnline: online,
+        lastSeenAt:
+          online
+            ? u.lastSeenAt
+            : atIso != null && String(atIso).trim() !== ""
+              ? String(atIso)
+              : u.lastSeenAt,
+      });
+      const activeChatUser =
+        s.activeChatUser && String(s.activeChatUser.id).toLowerCase() === idLower
+          ? patchUser(s.activeChatUser)
+          : s.activeChatUser;
+      const chats = s.chats.map((c) =>
+        String(c.otherUser.id).toLowerCase() === idLower ? { ...c, otherUser: patchUser(c.otherUser) } : c
+      );
+      return { activeChatUser, chats };
+    });
   },
 }));

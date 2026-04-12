@@ -64,6 +64,18 @@ export interface MeResponse {
   avatar?: string | null;
 }
 
+export interface UpdateMeRequest {
+  first_name?: string;
+  last_name?: string;
+  middle_name?: string;
+  /**
+   * Формат `YYYY-MM-DD`.
+   * Если поле не передано (undefined), сервер может оставить текущее значение.
+   */
+  birth_date?: string;
+  avatar?: string | null;
+}
+
 class ChatAuthApiError extends Error {
   constructor(
     message: string,
@@ -141,6 +153,23 @@ export const chatAuthApi = {
   /** Текущий пользователь. GET /auth/me */
   async getMe(accessToken: string): Promise<MeResponse> {
     return authRequest<MeResponse>("/api/v1/auth/me", accessToken);
+  },
+
+  /** Обновление данных пользователя. POST /auth/update */
+  async updateMe(accessToken: string, data: UpdateMeRequest): Promise<MeResponse> {
+    const url = `${BASE_URL.replace(/\/$/, "")}/api/v1/auth/update`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
+      body: JSON.stringify(data),
+    });
+
+    const json = await res.json().catch(() => ({}));
+    const detail = typeof (json as { detail?: string }).detail === "string" ? (json as { detail: string }).detail : undefined;
+    if (!res.ok) {
+      throw new ChatAuthApiError(detail || res.statusText || `HTTP ${res.status}`, res.status, detail);
+    }
+    return json as MeResponse;
   },
 };
 

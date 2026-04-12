@@ -12,6 +12,17 @@ export function formatMessageTime(timestamp: string): string {
   }
 }
 
+/** Только часы:минуты — для пузырька в треде (дата уже в разделителе по дням). */
+export function formatMessageClock(timestamp: string): string {
+  try {
+    const date = new Date(timestamp);
+    if (Number.isNaN(date.getTime())) return timestamp;
+    return format(date, "HH:mm");
+  } catch {
+    return timestamp;
+  }
+}
+
 export function formatChatDate(timestamp: string): string {
   try {
     const date = new Date(timestamp);
@@ -33,8 +44,13 @@ export function getMessagePreviewText(
     const name = content.file.name ?? "";
     const lowerName = name.toLowerCase();
 
+    if (mime.startsWith("video/")) return "Видеосообщение";
     if (mime.startsWith("audio/")) return "Голосовое сообщение";
-    if (/\.(webm|ogg|opus|mp3|wav|m4a|aac|flac|amr)$/.test(lowerName)) return "Голосовое сообщение";
+    if (/\.(mp4|mov|m4v|mkv)$/.test(lowerName)) return "Видеосообщение";
+    if (/\.webm$/.test(lowerName)) {
+      return lowerName.startsWith("audio-") ? "Голосовое сообщение" : "Видеосообщение";
+    }
+    if (/\.(ogg|opus|mp3|wav|m4a|aac|flac|amr)$/.test(lowerName)) return "Голосовое сообщение";
 
     if (mime.startsWith("image/")) return "Изображение";
     if (/\.(png|jpe?g|gif|webp|bmp|svg)$/.test(lowerName)) return "Изображение";
@@ -43,6 +59,36 @@ export function getMessagePreviewText(
   }
   const text = content?.type === "text" ? content.text ?? "" : "";
   return text.length <= maxLength ? text : text.slice(0, maxLength) + "...";
+}
+
+/** Полный текст для копирования (без обрезки). */
+export function getMessagePlainText(content: {
+  type: string;
+  text?: string;
+  file?: { name: string; mimeType?: string };
+}): string {
+  if (content?.type === "file" && content.file) {
+    const mime = content.file.mimeType ?? "";
+    const name = content.file.name ?? "";
+    const lowerName = name.toLowerCase();
+    let fileLabel = "";
+    if (mime.startsWith("video/") || /\.(mp4|mov|m4v|mkv)$/.test(lowerName)) {
+      fileLabel = "Видеосообщение";
+    } else if (/\.webm$/.test(lowerName)) {
+      fileLabel = lowerName.startsWith("audio-") ? "Голосовое сообщение" : "Видеосообщение";
+    } else if (mime.startsWith("audio/") || /\.(ogg|opus|mp3|wav|m4a|aac|flac|amr)$/.test(lowerName)) {
+      fileLabel = "Голосовое сообщение";
+    } else if (mime.startsWith("image/") || /\.(png|jpe?g|gif|webp|bmp|svg)$/.test(lowerName)) {
+      fileLabel = "Изображение";
+    } else if (name) {
+      fileLabel = `Вложение: ${name}`;
+    } else {
+      fileLabel = "Вложение";
+    }
+    const note = typeof content.text === "string" && content.text.trim() ? content.text.trim() : "";
+    return note ? `${note}\n${fileLabel}` : fileLabel;
+  }
+  return content?.type === "text" ? (content.text ?? "") : "";
 }
 
 const PREVIEW_MAX_SIZE = 120;

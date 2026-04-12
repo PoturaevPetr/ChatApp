@@ -21,6 +21,8 @@ export interface UserSearchItem {
   avatar?: string | null;
   /** Полное имя для отображения (собрано из first_name, last_name, middle_name) */
   name?: string;
+  /** ISO 8601, поле API last_seen_at */
+  lastSeenAt?: string | null;
 }
 
 export async function searchUsers(
@@ -67,6 +69,7 @@ export async function searchUsers(
       middle_name?: string;
       birth_date?: string;
       avatar?: string | null;
+      last_seen_at?: string | null;
     }) => parseUserFromApi(u))
     .filter((u) => u.id);
 }
@@ -79,10 +82,12 @@ function parseUserFromApi(u: {
   middle_name?: string;
   birth_date?: string;
   avatar?: string | null;
+  last_seen_at?: string | null;
 }): UserSearchItem {
   const id = String(u.id ?? u.user_id ?? "");
   const parts = [u.last_name, u.first_name, u.middle_name].filter(Boolean) as string[];
   const name = parts.length > 0 ? parts.join(" ").trim() : undefined;
+  const rawSeen = u.last_seen_at;
   return {
     id,
     first_name: u.first_name,
@@ -91,6 +96,7 @@ function parseUserFromApi(u: {
     birth_date: u.birth_date,
     avatar: u.avatar ?? null,
     name,
+    lastSeenAt: rawSeen != null && String(rawSeen).trim() !== "" ? String(rawSeen) : null,
   };
 }
 
@@ -131,6 +137,7 @@ export async function getUserById(
     middle_name?: string;
     birth_date?: string;
     avatar?: string | null;
+    last_seen_at?: string | null;
   };
   return parseUserFromApi(data);
 }

@@ -16,6 +16,7 @@ export interface RoomUser {
   middle_name?: string;
   birth_date?: string;
   avatar?: string | null;
+  last_seen_at?: string | null;
 }
 
 /** Последнее сообщение комнаты (превью в списке чатов). */
@@ -39,6 +40,7 @@ export interface Room {
   created_by: string;
   users: RoomUser[];
   last_message?: RoomLastMessage | null;
+  unread_count?: number;
 }
 
 export interface CreateRoomResponse {
@@ -84,8 +86,10 @@ export async function getRooms(accessToken: string): Promise<Room[]> {
       middle_name: u.middle_name,
       birth_date: u.birth_date,
       avatar: u.avatar ?? null,
+      last_seen_at: u.last_seen_at ?? null,
     })) : [],
     last_message: r.last_message ?? null,
+    unread_count: typeof (r as unknown as { unread_count?: unknown }).unread_count === "number" ? (r as unknown as { unread_count: number }).unread_count : 0,
   }));
 }
 

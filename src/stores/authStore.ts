@@ -4,6 +4,7 @@ import { create } from "zustand";
 import { getValidAuthTokens } from "@/lib/validAuthToken";
 import {
   getAuth,
+  setAuth,
   getChatKeys,
   setAuthWithTokens,
   setChatKeys,
@@ -14,6 +15,8 @@ import {
 } from "@/lib/secureStorage";
 import { chatAuthApi, ChatAuthApiError } from "@/services/chatAuthApi";
 import { getMyKeypair } from "@/services/chatKeysApi";
+import { useChatStore } from "@/stores/chatStore";
+import { syncPushWithBackend } from "@/lib/pushNotifications";
 
 export interface RegisterData {
   username: string;
@@ -34,6 +37,8 @@ interface AuthState {
   register: (data: RegisterData) => Promise<void>;
   logout: () => Promise<void>;
   clearError: () => void;
+  /** Обновить данные текущего пользователя (avatar, name) и сохранить в storage — сразу отображается везде. */
+  updateUser: (patch: Partial<Pick<StoredUser, "name" | "avatar">>) => Promise<void>;
 }
 
 export const useAuthStore = create<AuthState>((set, get) => ({
@@ -75,6 +80,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           isLoading: false,
           error: null,
         });
+        void syncPushWithBackend().catch(() => {});
         return;
       }
       set({ user: null, isAuthenticated: false, isLoading: false });
@@ -118,6 +124,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         isLoading: false,
         error: null,
       });
+      void syncPushWithBackend().catch(() => {});
     } catch (e) {
       const message =
         e instanceof ChatAuthApiError
@@ -168,8 +175,23 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   logout: async () => {
     await clearAuthData();
+    useChatStore.getState().resetSession();
     set({ user: null, isAuthenticated: false, error: null });
   },
 
   clearError: () => set({ error: null }),
+
+  updateUser: async (patch) => {
+    const current = get().user;
+    if (!current) return;
+    const updated: StoredUser = { ...current, ...patch };
+    // Сначала обновляем Zustand, чтобы UI обновился сразу.
+    set({ user: updated });
+    // Затем пытаемся сохранить в storage. Если quota/ошибка — не ломаем UI.
+    try {
+      await setAuth(updated);
+    } catch (e) {
+      console.warn("[Auth] Failed to persist user update:", e);
+    }
+  },
 }));

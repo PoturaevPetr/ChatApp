@@ -1,12 +1,12 @@
 #!/bin/bash
-# Сборка APK для Pepa (ChatApp)
+# Сборка APK для Kindred
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 PROJECT_DIR="$SCRIPT_DIR"
-APP_NAME="Pepa"
-APK_OUT_NAME="Pepa.apk"
+APP_NAME="Kindred"
+APK_OUT_NAME="Kindred.apk"
 
 echo "🔧 Сборка APK: $APP_NAME"
 echo "   Проект: $PROJECT_DIR"
@@ -53,6 +53,39 @@ fi
 echo "🔄 Синхронизация Capacitor..."
 npx cap sync android
 
+# FCM: google-services.json должен лежать в android/app (Gradle подключает плагин только оттуда).
+if [ -f "$PROJECT_DIR/google-services.json" ]; then
+  cp "$PROJECT_DIR/google-services.json" "$PROJECT_DIR/android/app/google-services.json"
+  echo "📱 Обновлён android/app/google-services.json из корня проекта (FCM)."
+elif [ ! -f "$PROJECT_DIR/android/app/google-services.json" ]; then
+  echo "⚠️  Нет google-services.json — FCM-пуши не заработают. Положите файл в корень ChatApp или в android/app/."
+fi
+
+# Патчим манифест после cap sync: добавляем нужные permissions, если их ещё нет.
+MANIFEST="android/app/src/main/AndroidManifest.xml"
+if [ -f "$MANIFEST" ]; then
+  for perm in "RECORD_AUDIO" "MODIFY_AUDIO_SETTINGS" "POST_NOTIFICATIONS"; do
+    if ! grep -q "android.permission.$perm" "$MANIFEST"; then
+      echo "🔧 Добавляю $perm в AndroidManifest..."
+      sed -i.bak "s|<uses-permission android:name=\"android.permission.INTERNET\" />|&"$'\n'"    <uses-permission android:name=\"android.permission.$perm\" />|" "$MANIFEST"
+      rm -f "${MANIFEST}.bak"
+    fi
+  done
+fi
+
+# Удаляем adaptive icons от Capacitor, чтобы использовались наши сгенерированные.
+echo "🗑️  Удаляю adaptive icons от Capacitor..."
+rm -rf android/app/src/main/res/mipmap-anydpi-v26 || true
+rm -f android/app/src/main/res/mipmap-*/ic_launcher_foreground.png || true
+
+# Генерируем иконки приложения из ./icon.png
+echo "🎨 Генерирую иконки приложения..."
+if [ -f "icon.png" ] && [ -f "generate_icons.py" ]; then
+  python3 generate_icons.py "icon.png" "android/app/src/main/res"
+else
+  echo "  ⚠️ icon.png или generate_icons.py не найден, пропускаю генерацию иконок"
+fi
+
 # Network security (для chat.pirogov.ai и локального API)
 echo "🔧 Настройка сети Android..."
 mkdir -p android/app/src/main/res/xml
@@ -72,6 +105,15 @@ cat > android/app/src/main/res/xml/network_security_config.xml << 'EOF'
     </base-config>
 </network-security-config>
 EOF
+
+# Принудительно обновляем отображаемое имя приложения
+STRINGS_FILE="android/app/src/main/res/values/strings.xml"
+if [ -f "$STRINGS_FILE" ]; then
+  echo "🔧 Обновляю строковые ресурсы приложения ($APP_NAME)..."
+  sed -i.bak "s|<string name=\"app_name\">[^<]*</string>|<string name=\"app_name\">${APP_NAME}</string>|" "$STRINGS_FILE" || true
+  sed -i.bak "s|<string name=\"title_activity_main\">[^<]*</string>|<string name=\"title_activity_main\">${APP_NAME}</string>|" "$STRINGS_FILE" || true
+  rm -f "${STRINGS_FILE}.bak" || true
+fi
 
 # Патчим AndroidManifest для доступа к API (cleartext + network config)
 MANIFEST="android/app/src/main/AndroidManifest.xml"

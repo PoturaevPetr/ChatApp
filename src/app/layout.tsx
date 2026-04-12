@@ -1,12 +1,19 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
 
 const inter = Inter({ subsets: ["latin", "cyrillic"], variable: "--font-sans" });
 
 export const metadata: Metadata = {
-  title: "ChatApp",
+  title: "Kindred",
   description: "Обмен сообщениями между пользователями",
+};
+
+/** Нужен для env(safe-area-inset-*) — нижняя панель не уезжает под жесты ОС / home indicator */
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
 };
 
 export default function RootLayout({
@@ -16,6 +23,9 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="ru" className="h-full" suppressHydrationWarning>
+      <head>
+        <meta httpEquiv="Permissions-Policy" content="microphone=(self)" />
+      </head>
       <body className={`${inter.variable} font-sans h-full antialiased`} suppressHydrationWarning>
         {children}
       </body>

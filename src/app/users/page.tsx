@@ -45,12 +45,12 @@ export default function UsersPage() {
           {others.length === 0 ? (
             <div className="p-4 text-muted-foreground">Нет других пользователей.</div>
           ) : (
-          <ul className="flex-1 overflow-y-auto">
+          <ul className="flex-1 overflow-y-auto pb-[env(safe-area-inset-bottom,0px)]">
             {others.map((u) => (
               <li key={u.id}>
                 <button
                   type="button"
-                  onClick={() => router.push(`/chat?userId=${encodeURIComponent(u.id)}&name=${encodeURIComponent(u.name)}`)}
+                  onClick={() => router.push(`/chat?userId=${encodeURIComponent(u.id)}`)}
                   className="w-full flex items-center gap-3 p-4 hover:bg-muted/50 active:bg-muted text-left"
                 >
                   <div className="w-12 h-12 rounded-full bg-primary/20 text-primary flex items-center justify-center font-medium">

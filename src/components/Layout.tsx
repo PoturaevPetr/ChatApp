@@ -3,20 +3,29 @@
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Loader2 } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
+import { useWebSocketStore } from "@/stores/websocketStore";
 import { WebSocketInitializer } from "@/components/WebSocketInitializer";
 
 export function Layout({ children }: { children: React.ReactNode }) {
   const { user } = useAuthStore();
+  const isSocketConnected = useWebSocketStore((s) => s.isConnected);
   const pathname = usePathname();
   const router = useRouter();
+  const isChatsListPage = pathname === "/" || pathname === "";
   const showBack =
     pathname === "/profile" ||
     pathname === "/profile/" ||
     pathname === "/chat" ||
-    pathname === "/chat/";
-  const hideTopBar = pathname === "/chat" || pathname === "/chat/";
+    pathname === "/chat/" ||
+    pathname === "/users/user" ||
+    pathname === "/users/user/";
+  const hideTopBar =
+    pathname === "/chat" ||
+    pathname === "/chat/" ||
+    pathname === "/profile" ||
+    pathname === "/profile/";
 
   return (
     <div className="flex flex-col h-full bg-background">
@@ -35,7 +44,18 @@ export function Layout({ children }: { children: React.ReactNode }) {
                   <ArrowLeft size={24} />
                 </button>
               )}
-              <span className="font-semibold text-foreground truncate">ChatApp</span>
+              {isChatsListPage && user && !isSocketConnected ? (
+                <span
+                  className="flex min-w-0 items-center gap-2 font-semibold text-foreground"
+                  aria-live="polite"
+                  aria-busy="true"
+                >
+                  <span className="truncate">Соединение</span>
+                  <Loader2 className="h-5 w-5 shrink-0 animate-spin text-primary" aria-hidden />
+                </span>
+              ) : (
+                <span className="font-semibold text-foreground truncate">Kindred</span>
+              )}
             </div>
             {user && (
               <Link
@@ -50,6 +70,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
                     width={36}
                     height={36}
                     className="rounded-full object-cover w-9 h-9"
+                    unoptimized
                   />
                 ) : (
                   <div className="w-9 h-9 rounded-full bg-primary/20 text-primary flex items-center justify-center text-sm font-semibold shrink-0">

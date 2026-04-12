@@ -35,13 +35,13 @@ export default function AuthPage() {
   }
 
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center p-6 bg-background">
+    <div className="min-h-screen flex flex-col items-center justify-center px-6 pt-6 pb-[calc(1.5rem+env(safe-area-inset-bottom,0px))] bg-background">
       <div className="w-full max-w-sm space-y-8">
         <div className="text-center">
           <div className="inline-flex w-16 h-16 rounded-2xl bg-primary/15 text-primary items-center justify-center mb-4">
             <MessageCircle size={32} />
           </div>
-          <h1 className="text-2xl font-bold text-foreground">ChatApp</h1>
+          <h1 className="text-2xl font-bold text-foreground">Kindred</h1>
           <p className="mt-2 text-muted-foreground">Выберите действие</p>
         </div>
 

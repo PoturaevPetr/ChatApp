@@ -5,8 +5,11 @@ import Link from "next/link";
 import { MessageCircle, Search, Pencil } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
 import { useChatStore } from "@/stores/chatStore";
+import { useWebSocketStore } from "@/stores/websocketStore";
+import { useChatListPullToRefresh } from "@/hooks/useChatListPullToRefresh";
 import { formatMessageTime, getMessagePreviewText, sortChatsWithUnreadFirst } from "@/utils/chatUtils";
 import { StartChatModal } from "@/components/StartChatModal";
+import Image from "next/image";
 
 function getInitials(name: string): string {
   const parts = name.trim().split(" ");
@@ -20,16 +23,30 @@ function getInitials(name: string): string {
 
 export function ChatList() {
   const { user } = useAuthStore();
-  const { chats, loadChats, loadUsers, isLoading, error } = useChatStore();
+  const { chats, loadUsers, loadChats, isLoading, error } = useChatStore();
+  const isSocketConnected = useWebSocketStore((s) => s.isConnected);
+  const ensureConnected = useWebSocketStore((s) => s.ensureConnected);
   const [search, setSearch] = useState("");
   const [startChatOpen, setStartChatOpen] = useState(false);
+  const listLoading = !isSocketConnected || isLoading;
+
+  // Только при появлении пользователя: не вешать на isSocketConnected — при каждом
+  // open/close эффект вызывал бы ensureConnected и усиливал гонки с WebSocketInitializer.
+  useEffect(() => {
+    if (!user?.id) return;
+    void ensureConnected(user.id);
+  }, [user?.id, ensureConnected]);
 
   useEffect(() => {
     if (user) {
       loadUsers();
-      void loadChats(user.id);
     }
-  }, [user?.id, loadUsers, loadChats]);
+  }, [user?.id, loadUsers]);
+
+  useChatListPullToRefresh(!!user, async () => {
+    if (!user?.id) return;
+    await loadChats(user.id, { force: true });
+  });
 
   if (!user) return null;
 
@@ -38,11 +55,11 @@ export function ChatList() {
       c.otherUser.name.toLowerCase().includes(search.toLowerCase())
   );
   const sorted = sortChatsWithUnreadFirst(filtered);
-  const isEmpty = !isLoading && sorted.length === 0;
+  const isEmpty = !listLoading && sorted.length === 0;
 
   return (
     <div className="flex flex-col h-full position-relative">
-      <div className="absolute bottom-5 right-2 border rounded-full p-2 bg-primary/60 text-white">
+      <div className="absolute right-2 border rounded-full p-2 bg-primary/60 text-white bottom-[calc(1.25rem+env(safe-area-inset-bottom,0px))]">
         <button
           type="button"
           onClick={() => setStartChatOpen(true)}
@@ -70,16 +87,18 @@ export function ChatList() {
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 overflow-y-auto pb-[env(safe-area-inset-bottom,0px)]">
         {error && (
           <div className="p-4 mx-4 mt-4 rounded-xl bg-destructive/10 text-destructive text-sm">
             {error}
           </div>
         )}
-        {isLoading ? (
+        {listLoading ? (
           <div className="flex flex-col items-center justify-center py-16">
             <div className="animate-spin rounded-full h-10 w-10 border-2 border-primary border-t-transparent mb-3" />
-            <p className="text-sm text-muted-foreground">Загрузка чатов...</p>
+            <p className="text-sm text-muted-foreground">
+              {!isSocketConnected ? "Ожидание соединения…" : "Загрузка чатов…"}
+            </p>
           </div>
         ) : isEmpty ? (
           <div className="flex flex-col items-center justify-center py-16 px-4 text-center">
@@ -103,14 +122,25 @@ export function ChatList() {
           <ul className="divide-y divide-border">
             {sorted.map((chat) => (
               <li key={chat.id}>
-                <Link href={`/chat?userId=${encodeURIComponent(chat.otherUser.id)}${chat.otherUser.name ? `&name=${encodeURIComponent(chat.otherUser.name)}` : ""}`} className="flex items-center gap-3 p-4 hover:bg-muted/50 active:bg-muted">
+                <Link href={`/chat?userId=${encodeURIComponent(chat.otherUser.id)}`} className="flex items-center gap-3 p-4 hover:bg-muted/50 active:bg-muted">
                   <div className="relative shrink-0">
-                    <div
-                      className="w-12 h-12 rounded-full bg-primary/20 text-primary flex items-center justify-center font-medium text-lg"
-                      style={{ fontSize: "1rem" }}
-                    >
-                      {getInitials(chat.otherUser.name)}
-                    </div>
+                    {chat.otherUser.avatar ? (
+                      <Image
+                        src={chat.otherUser.avatar}
+                        alt=""
+                        width={48}
+                        height={48}
+                        className="rounded-full object-cover w-12 h-12"
+                        unoptimized
+                      />
+                    ) : (
+                      <div
+                        className="w-12 h-12 rounded-full bg-primary/20 text-primary flex items-center justify-center font-medium text-lg"
+                        style={{ fontSize: "1rem" }}
+                      >
+                        {getInitials(chat.otherUser.name)}
+                      </div>
+                    )}
                     {chat.unreadCount > 0 && (
                       <span className="absolute -top-0.5 -right-0.5 min-w-[20px] h-5 px-1.5 rounded-full bg-primary text-primary-foreground text-xs flex items-center justify-center">
                         {chat.unreadCount > 99 ? "99+" : chat.unreadCount}

@@ -4,6 +4,50 @@ const AUTH_KEYS_KEY = "chatapp_keys";
 const USERS_KEY = "chatapp_users";
 const MESSAGES_KEY = "chatapp_messages";
 
+/** Base64 видео/фото раздувает JSON и ломает квоту localStorage (~5 МБ). Пустой data + file_ref достаточно для метаданных. */
+const MAX_FILE_BASE64_CHARS_IN_STORAGE = 24_000;
+
+function stripFileDataForStorage(content: StoredMessageContent): StoredMessageContent {
+  if (content.type !== "file") return content;
+  const { data } = content.file;
+  if (!data || data.length <= MAX_FILE_BASE64_CHARS_IN_STORAGE) return content;
+  return {
+    ...content,
+    file: { ...content.file, data: "" },
+  };
+}
+
+/** Все вложения без тела — последняя попытка уложиться в квоту. */
+function stripAllFileBodies(messages: StoredMessage[]): StoredMessage[] {
+  return messages.map((m) => ({
+    ...m,
+    content:
+      m.content.type === "file"
+        ? { ...m.content, file: { ...m.content.file, data: "" } }
+        : m.content,
+  }));
+}
+
+function safeSetStoredMessages(messages: StoredMessage[]): void {
+  if (typeof window === "undefined") return;
+  const write = (list: StoredMessage[]) => {
+    localStorage.setItem(MESSAGES_KEY, JSON.stringify(list));
+  };
+  try {
+    write(messages);
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "QuotaExceededError") {
+      try {
+        write(stripAllFileBodies(messages));
+      } catch {
+        console.warn("[storage] chatapp_messages: квота localStorage исчерпана даже без тел вложений");
+      }
+    } else {
+      throw e;
+    }
+  }
+}
+
 export interface StoredUser {
   id: string;
   name: string;
@@ -22,7 +66,24 @@ export interface StoredChatKeys {
 
 export type StoredMessageContent =
   | { type: "text"; text: string; reply_to?: { id: string; preview: string } }
-  | { type: "file"; text?: string; file: { name: string; mimeType: string; data: string }; reply_to?: { id: string; preview: string } };
+  | {
+      type: "file";
+      text?: string;
+      file: {
+        name: string;
+        mimeType: string;
+        data: string;
+        file_ref?: {
+          attachment_id: string;
+          thumb_attachment_id?: string;
+          full_key_b64?: string;
+          full_nonce_b64?: string;
+          thumb_key_b64?: string;
+          thumb_nonce_b64?: string;
+        };
+      };
+      reply_to?: { id: string; preview: string };
+    };
 
 export interface StoredMessage {
   id: string;
@@ -126,8 +187,13 @@ export function appendMessage(msg: Omit<StoredMessage, "id" | "timestamp" | "sta
     timestamp: new Date().toISOString(),
     status: "sent",
   };
-  messages.push(newMsg);
-  localStorage.setItem(MESSAGES_KEY, JSON.stringify(messages));
+  const persisted: StoredMessage = {
+    ...newMsg,
+    content: stripFileDataForStorage(newMsg.content),
+  };
+  messages.push(persisted);
+  safeSetStoredMessages(messages);
+  /** В памяти приложения оставляем полное тело файла (превью до ответа сервера). */
   return newMsg;
 }
 
@@ -147,7 +213,7 @@ export function markThreadAsRead(userId1: string, userId2: string): void {
     }
     return m;
   });
-  if (changed) localStorage.setItem(MESSAGES_KEY, JSON.stringify(updated));
+  if (changed) safeSetStoredMessages(updated);
 }
 
 export function getDemoUsers(): StoredUser[] {

@@ -17,6 +17,18 @@ export function getWebSocketUrl(userId: string, accessToken: string): string {
   return `${wsBase}/ws/${userId}?${params.toString()}`;
 }
 
+/** user_id из пути `/ws/{id}` — для сравнения без query (токен). */
+function wsUrlUserId(url: string): string | null {
+  try {
+    const path = new URL(url).pathname;
+    const m = path.match(/\/ws\/([^/]+)\/?$/);
+    return m ? decodeURIComponent(m[1]) : null;
+  } catch {
+    const m = url.match(/\/ws\/([^/?#]+)/);
+    return m ? m[1] : null;
+  }
+}
+
 export interface ChatWebSocketMessage {
   type: string;
   data?: unknown;
@@ -40,6 +52,14 @@ class ChatWebSocketClient {
   connect(userId: string, accessToken: string, callbacks?: ChatWebSocketCallbacks): void {
     const newUrl = getWebSocketUrl(userId, accessToken);
     if (this.ws?.readyState === WebSocket.OPEN && this.url === newUrl) return;
+
+    const sameAccount =
+      this.url != null && wsUrlUserId(this.url) === userId && wsUrlUserId(newUrl) === userId;
+    // Не обрываем CONNECTING: иначе WebSocketInitializer и ensureConnected по очереди
+    // рвут чужую попытку подключения → бесконечные переподключения.
+    if (this.ws?.readyState === WebSocket.CONNECTING && sameAccount) return;
+    // Уже открыт сокет этого пользователя (другой token в URL не трогаем — сервер уже принял сессию).
+    if (this.ws?.readyState === WebSocket.OPEN && sameAccount) return;
 
     this.disconnect();
     this.callbacks = callbacks ?? {};
@@ -94,6 +114,10 @@ class ChatWebSocketClient {
 
   isConnected(): boolean {
     return this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  isConnecting(): boolean {
+    return this.ws?.readyState === WebSocket.CONNECTING;
   }
 
   /** Ждать подключения до timeoutMs. Возвращает true, если подключились, false по таймауту. */

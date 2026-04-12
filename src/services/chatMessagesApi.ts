@@ -38,19 +38,37 @@ export async function getMessage(
   return data;
 }
 
+/** Удалить сообщение на сервере (только своё). Остальные участники получают событие по WebSocket. */
+export async function deleteMessage(accessToken: string, messageId: string): Promise<void> {
+  const url = `${BASE_URL.replace(/\/$/, "")}/api/v1/messages/${encodeURIComponent(messageId)}`;
+  const res = await fetch(url, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (res.status === 204) return;
+  const data = await res.json().catch(() => ({}));
+  const detail =
+    typeof (data as { detail?: string }).detail === "string"
+      ? (data as { detail: string }).detail
+      : res.statusText;
+  throw new Error(detail || `HTTP ${res.status}`);
+}
+
 /** Сервер принимает limit от 1 до 100. roomId — ID чата (комнаты), при передаче возвращаются только сообщения этого чата. */
 export async function getMessages(
   accessToken: string,
   limit = 100,
   offset = 0,
   unreadOnly = false,
-  roomId?: string | null
+  roomId?: string | null,
+  markRead = false
 ): Promise<MessageResponse[]> {
   const url = new URL(`${BASE_URL.replace(/\/$/, "")}/api/v1/messages/`);
   url.searchParams.set("limit", String(Math.min(100, Math.max(1, limit))));
   url.searchParams.set("offset", String(Math.max(0, offset)));
   if (unreadOnly) url.searchParams.set("unread_only", "true");
   if (roomId != null && roomId !== "") url.searchParams.set("room_id", roomId);
+  if (markRead) url.searchParams.set("mark_read", "true");
 
   const res = await fetch(url.toString(), {
     method: "GET",
@@ -67,4 +85,22 @@ export async function getMessages(
 
   const data = (await res.json()) as MessageResponse[];
   return Array.isArray(data) ? data : [];
+}
+
+/**
+ * Пометить все входящие сообщения в комнате как прочитанные (recipient=current_user).
+ * Используется при открытии чата, чтобы бейджи на списке чатов корректно сбрасывались.
+ */
+export async function markRoomMessagesAsRead(accessToken: string, roomId: string): Promise<void> {
+  const id = roomId.trim();
+  if (!id) return;
+  const url = `${BASE_URL.replace(/\/$/, "")}/api/v1/messages/rooms/${encodeURIComponent(id)}/read`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) {
+    // Поскольку это "не критично для основного UI", кидаем ошибку наверх только если нужно.
+    throw new Error(`HTTP ${res.status}`);
+  }
 }
