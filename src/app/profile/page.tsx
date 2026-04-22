@@ -5,23 +5,44 @@ import { useEffect, useState } from "react";
 import { AuthGuard } from "@/components/AuthGuard";
 import { Layout } from "@/components/Layout";
 import { LogoutConfirmModal } from "@/components/LogoutConfirmModal";
-import { AvatarUploadModal } from "@/components/AvatarUploadModal";
+import { AttachFileModal } from "@/components/AttachFileModal";
 import { useAuthStore } from "@/stores/authStore";
 import { getValidAuthTokens } from "@/lib/validAuthToken";
 import { getChatKeys, getChatKeysForUser, setChatKeys } from "@/lib/secureStorage";
 import { chatAuthApi } from "@/services/chatAuthApi";
-import { LogOut, Loader2, User, Calendar, ArrowLeft } from "lucide-react";
+import { LogOut, Loader2, Pencil } from "lucide-react";
 import NextImage from "next/image";
 import { useRef } from "react";
+import { ProfileEditModal } from "@/components/ProfileEditModal";
+import { fileToAvatarDataUrl } from "@/lib/avatarImage";
 
-function formatBirthDate(value: string | undefined): string {
-  if (!value?.trim()) return "—";
-  const d = value.trim();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(d)) {
-    const [y, m, day] = d.split("-");
-    return `${day}.${m}.${y}`;
-  }
-  return d;
+function getInitials(name: string): string {
+  const s = (name || "").trim();
+  if (!s) return "?";
+  const parts = s.split(/\s+/).filter(Boolean);
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return parts
+    .map((p) => p[0])
+    .join("")
+    .toUpperCase()
+    .slice(0, 2);
+}
+
+function formatBirthDateWithAge(raw: string): string {
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return raw;
+  const now = new Date();
+  let age = now.getFullYear() - d.getFullYear();
+  const hasBirthdayPassedThisYear =
+    now.getMonth() > d.getMonth() || (now.getMonth() === d.getMonth() && now.getDate() >= d.getDate());
+  if (!hasBirthdayPassedThisYear) age -= 1;
+  const dateText = new Intl.DateTimeFormat("ru-RU", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  }).format(d);
+  if (!Number.isFinite(age) || age <= 0) return dateText;
+  return `${dateText} (${age})`;
 }
 
 /** Приводим ответ /auth/me к виду для отображения (ФИО, дата, аватар) */
@@ -67,73 +88,11 @@ export default function ProfilePage() {
   const [hasChatKeys, setHasChatKeys] = useState<boolean | null>(null);
   const [showLogoutModal, setShowLogoutModal] = useState(false);
   const [showAvatarModal, setShowAvatarModal] = useState(false);
+  const [showEditProfileModal, setShowEditProfileModal] = useState(false);
   const [isUploadingAvatar, setIsUploadingAvatar] = useState(false);
   const [avatarError, setAvatarError] = useState<string | null>(null);
-  const [isEditing, setIsEditing] = useState(false);
-  const [editFirstName, setEditFirstName] = useState("");
-  const [editLastName, setEditLastName] = useState("");
-  const [editMiddleName, setEditMiddleName] = useState("");
-  const [editBirthDate, setEditBirthDate] = useState(""); // YYYY-MM-DD
-  const [saveError, setSaveError] = useState<string | null>(null);
-  const [isSaving, setIsSaving] = useState(false);
   const photoInputRef = useRef<HTMLInputElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-
-  const readFileAsDataUrl = (blob: Blob): Promise<string> =>
-    new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result));
-      reader.onerror = () => reject(new Error("Не удалось прочитать файл"));
-      reader.readAsDataURL(blob);
-    });
-
-  const fileToAvatarDataUrl = async (file: File): Promise<string> => {
-    // Сжимаем/уменьшаем изображение, чтобы base64 влезал в localStorage и не был огромным.
-    const MAX_SIDE = 256;
-    const QUALITY = 0.85;
-
-    const objectUrl = URL.createObjectURL(file);
-    try {
-      const img = await new Promise<HTMLImageElement>((resolve, reject) => {
-        const i = new window.Image();
-        i.onload = () => resolve(i);
-        i.onerror = () => reject(new Error("Не удалось загрузить изображение"));
-        i.src = objectUrl;
-      });
-
-      const w = img.naturalWidth || img.width;
-      const h = img.naturalHeight || img.height;
-      if (!w || !h) throw new Error("Некорректное изображение");
-
-      const scale = Math.min(1, MAX_SIDE / Math.max(w, h));
-      const outW = Math.max(1, Math.round(w * scale));
-      const outH = Math.max(1, Math.round(h * scale));
-
-      const canvas = document.createElement("canvas");
-      canvas.width = outW;
-      canvas.height = outH;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) throw new Error("Canvas недоступен");
-      ctx.drawImage(img, 0, 0, outW, outH);
-
-      const blob = await new Promise<Blob>((resolve, reject) => {
-        canvas.toBlob(
-          (b) => (b ? resolve(b) : reject(new Error("Не удалось сжать изображение"))),
-          "image/jpeg",
-          QUALITY,
-        );
-      });
-
-      // Дополнительная защита: если даже после сжатия слишком большой — просим выбрать другое.
-      if (blob.size > 800 * 1024) {
-        throw new Error("Аватар слишком большой даже после сжатия (выберите другое фото)");
-      }
-
-      return await readFileAsDataUrl(blob);
-    } finally {
-      URL.revokeObjectURL(objectUrl);
-    }
-  };
 
   const saveAvatar = async (dataUrl: string) => {
     const tokens = await getValidAuthTokens();
@@ -142,6 +101,21 @@ export default function ProfilePage() {
     const updated = await chatAuthApi.updateMe(tokens.access_token, { avatar: dataUrl });
     setProfile(meToProfile(updated));
     await updateUser({ avatar: dataUrl });
+  };
+
+  const ingestAvatarFile = async (f: File) => {
+    try {
+      setAvatarError(null);
+      setIsUploadingAvatar(true);
+      if (f.size > 10 * 1024 * 1024) throw new Error("Файл слишком большой (макс 10MB)");
+      const dataUrl = await fileToAvatarDataUrl(f);
+      await saveAvatar(dataUrl);
+      setShowAvatarModal(false);
+    } catch (err) {
+      setAvatarError(err instanceof Error ? err.message : "Ошибка загрузки аватара");
+    } finally {
+      setIsUploadingAvatar(false);
+    }
   };
 
   useEffect(() => {
@@ -187,274 +161,126 @@ export default function ProfilePage() {
 
   const displayName = profile?.name?.trim() || user?.name?.trim() || "Пользователь";
 
-  // Синхронизируем поля редактирования только когда профиль загружен и мы НЕ в режиме редактирования.
-  useEffect(() => {
-    if (!profile || isEditing) return;
-    setEditFirstName(profile.first_name ?? "");
-    setEditLastName(profile.last_name ?? "");
-    setEditMiddleName(profile.middle_name ?? "");
-    setEditBirthDate(profile.birth_date ?? "");
-  }, [profile, isEditing]);
-
-  const startEditing = () => {
-    if (!profile) return;
-    setSaveError(null);
-    setIsEditing(true);
-    setEditFirstName(profile.first_name ?? "");
-    setEditLastName(profile.last_name ?? "");
-    setEditMiddleName(profile.middle_name ?? "");
-    setEditBirthDate(profile.birth_date ?? "");
-  };
-
-  const cancelEditing = () => {
-    setSaveError(null);
-    setIsEditing(false);
-    if (profile) {
-      setEditFirstName(profile.first_name ?? "");
-      setEditLastName(profile.last_name ?? "");
-      setEditMiddleName(profile.middle_name ?? "");
-      setEditBirthDate(profile.birth_date ?? "");
-    }
-  };
-
-  const saveProfile = async () => {
-    if (!profile) return;
-    setSaveError(null);
-
-    const first = editFirstName.trim();
-    const last = editLastName.trim();
-    const middle = editMiddleName.trim();
-    const birth = editBirthDate.trim();
-
-    if (!first || !last) {
-      setSaveError("Пожалуйста, заполните имя и фамилию");
-      return;
-    }
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(birth)) {
-      setSaveError("Пожалуйста, выберите корректную дату рождения");
-      return;
-    }
-
-    try {
-      setIsSaving(true);
-      const tokens = await getValidAuthTokens();
-      if (!tokens?.access_token) throw new Error("Нет access token");
-
-      const updated = await chatAuthApi.updateMe(tokens.access_token, {
-        first_name: first,
-        last_name: last,
-        middle_name: middle || undefined,
-        birth_date: birth,
-      });
-
-      setProfile(meToProfile(updated));
-      setIsEditing(false);
-    } catch (e) {
-      setSaveError(e instanceof Error ? e.message : "Ошибка сохранения");
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
   return (
     <AuthGuard requireAuth>
       <>
         <Layout>
-          <div className="p-4 pb-[calc(1rem+env(safe-area-inset-bottom,0px))] space-y-6">
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => router.back()}
-              className="p-1 shrink-0 text-muted-foreground hover:text-foreground transition-colors"
-              aria-label="Назад"
-              title="Назад"
-            >
-              <ArrowLeft size={22} />
-            </button>
-            <h1 className="text-xl font-semibold text-foreground">Профиль</h1>
-          </div>
-
-          {loading && (
-            <div className="flex items-center justify-center py-12 text-muted-foreground">
-              <Loader2 className="w-8 h-8 animate-spin" />
-            </div>
-          )}
-
-          {loadError && !loading && (
-            <p className="text-destructive text-sm py-4">{loadError}</p>
-          )}
-
-          {user && !loading && (
-            <>
-              <div className="rounded-xl bg-card border border-border overflow-hidden">
-                <div className="flex items-center gap-4 p-4 border-b border-border">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setAvatarError(null);
-                      setShowAvatarModal(true);
-                    }}
-                    className="shrink-0"
-                    aria-label="Изменить аватар"
-                    title="Изменить аватар"
-                  >
-                    {profile?.avatar ?? user.avatar ? (
-                      <span className="relative block w-16 h-16">
-                        <NextImage
-                          src={(profile?.avatar ?? user.avatar) as string}
-                          alt=""
-                          width={64}
-                          height={64}
-                          className="rounded-full object-cover w-16 h-16 shrink-0"
-                          unoptimized
-                        />
-                        {isUploadingAvatar && (
-                          <span className="absolute inset-0 rounded-full bg-black/30 flex items-center justify-center">
-                            <Loader2 className="w-5 h-5 animate-spin text-white" />
-                          </span>
-                        )}
-                      </span>
-                    ) : (
-                      <span className="w-16 h-16 rounded-full bg-primary/20 text-primary flex items-center justify-center text-2xl font-semibold shrink-0">
-                        {displayName.slice(0, 2).toUpperCase() || "?"}
-                      </span>
-                    )}
-                  </button>
-                  <div className="min-w-0 flex-1">
-                    <p className="font-medium text-foreground text-lg">{displayName}</p>
-                  </div>
-
-                  {!isEditing && (
-                    <button
-                      type="button"
-                      onClick={startEditing}
-                      className="shrink-0 rounded-xl border border-border bg-card px-3 py-2 text-sm text-muted-foreground hover:bg-muted/50 transition-colors"
-                    >
-                      Редактировать
-                    </button>
-                  )}
-                </div>
-
-                {!isEditing ? (
-                  <dl className="divide-y divide-border">
-                    <InfoRow label="Фамилия" value={profile?.last_name} icon={<User size={18} className="text-muted-foreground" />} />
-                    <InfoRow label="Имя" value={profile?.first_name} icon={<User size={18} className="text-muted-foreground" />} />
-                    <InfoRow label="Отчество" value={profile?.middle_name} icon={<User size={18} className="text-muted-foreground" />} />
-                    <InfoRow
-                      label="Дата рождения"
-                      value={formatBirthDate(profile?.birth_date)}
-                      icon={<Calendar size={18} className="text-muted-foreground" />}
-                    />
-                  </dl>
-                ) : (
-                  <div className="p-4 space-y-4">
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      <label className="block">
-                        <span className="block text-sm font-medium text-foreground mb-1">Фамилия</span>
-                        <input
-                          value={editLastName}
-                          onChange={(e) => setEditLastName(e.target.value)}
-                          className="w-full rounded-xl border border-border bg-background px-3 py-2 text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
-                          placeholder="Иванов"
-                        />
-                      </label>
-                      <label className="block">
-                        <span className="block text-sm font-medium text-foreground mb-1">Имя</span>
-                        <input
-                          value={editFirstName}
-                          onChange={(e) => setEditFirstName(e.target.value)}
-                          className="w-full rounded-xl border border-border bg-background px-3 py-2 text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
-                          placeholder="Иван"
-                        />
-                      </label>
-                      <label className="block sm:col-span-2">
-                        <span className="block text-sm font-medium text-foreground mb-1">Отчество</span>
-                        <input
-                          value={editMiddleName}
-                          onChange={(e) => setEditMiddleName(e.target.value)}
-                          className="w-full rounded-xl border border-border bg-background px-3 py-2 text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
-                          placeholder="Иванович"
-                        />
-                      </label>
-                      <label className="block sm:col-span-2">
-                        <span className="block text-sm font-medium text-foreground mb-1">Дата рождения</span>
-                        <input
-                          type="date"
-                          value={editBirthDate}
-                          onChange={(e) => setEditBirthDate(e.target.value)}
-                          className="w-full rounded-xl border border-border bg-background px-3 py-2 text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
-                        />
-                      </label>
-                    </div>
-
-                    {saveError && <p className="text-destructive text-sm">{saveError}</p>}
-
-                    <div className="flex gap-3">
-                      <button
-                        type="button"
-                        onClick={cancelEditing}
-                        disabled={isSaving}
-                        className="flex-1 rounded-xl border border-border bg-card px-4 py-2 text-muted-foreground hover:bg-muted/50 transition-colors disabled:opacity-60"
-                      >
-                        Отмена
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void saveProfile()}
-                        disabled={isSaving}
-                        className="flex-1 rounded-xl bg-primary px-4 py-2 text-primary-foreground hover:opacity-95 transition-opacity disabled:opacity-60"
-                      >
-                        {isSaving ? (
-                          <span className="inline-flex items-center justify-center gap-2">
-                            <Loader2 className="w-4 h-4 animate-spin" />
-                            Сохранение...
-                          </span>
-                        ) : (
-                          "Сохранить"
-                        )}
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {avatarError && (
-                  <div className="px-4 pb-4">
-                    <p className="text-destructive text-sm">{avatarError}</p>
-                  </div>
-                )}
-              </div>
-
-              {hasChatKeys === false && (
-                <div className="rounded-xl border border-amber-500/50 bg-amber-500/10 p-4 text-sm text-foreground">
-                  <p className="font-medium text-amber-700 dark:text-amber-400">Нет ключей для чата</p>
-                  <p className="mt-1 text-muted-foreground">
-                    Ключи шифрования создаются при регистрации в этом приложении. Без них нельзя расшифровать сообщения. Войдите на устройстве, где регистрировались, или зарегистрируйтесь заново.
-                  </p>
+          <div className="flex flex-col h-full">
+            <div className="flex-1 overflow-y-auto p-6 pb-[calc(1.5rem+env(safe-area-inset-bottom,0px))]">
+              {loading && (
+                <div className="flex flex-col items-center justify-center py-12">
+                  <Loader2 size={32} className="animate-spin text-primary mb-2" />
+                  <p className="text-sm text-muted-foreground">Загрузка...</p>
                 </div>
               )}
 
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  setShowLogoutModal(true);
-                }}
-                className="flex items-center gap-2 w-full justify-center px-4 py-3 rounded-xl border border-border bg-card text-muted-foreground hover:bg-muted/50 transition-colors"
-              >
-                <LogOut size={20} />
-                <span>Выйти</span>
-              </button>
-            </>
-          )}
-        </div>
+              {loadError && !loading && (
+                <div className="py-8 text-center">
+                  <p className="text-destructive">{loadError}</p>
+                </div>
+              )}
+
+              {user && !loading && (
+                <>
+                  <div className="flex flex-col items-center text-center mb-8">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAvatarError(null);
+                        setShowAvatarModal(true);
+                      }}
+                      className="relative w-24 h-24 rounded-full overflow-hidden bg-primary/20 text-primary flex items-center justify-center font-medium text-3xl mb-4 ring-offset-background focus:outline-none focus:ring-2 focus:ring-primary/50 focus:ring-offset-2"
+                      aria-label="Сменить фото"
+                      title="Сменить фото"
+                    >
+                      {profile?.avatar ?? user.avatar ? (
+                        <NextImage
+                          src={(profile?.avatar ?? user.avatar) as string}
+                          alt=""
+                          width={96}
+                          height={96}
+                          className="h-full w-full object-cover"
+                          unoptimized
+                        />
+                      ) : (
+                        getInitials(displayName)
+                      )}
+                      {isUploadingAvatar ? (
+                        <span className="absolute inset-0 flex items-center justify-center bg-black/35">
+                          <Loader2 className="w-8 h-8 animate-spin text-white" />
+                        </span>
+                      ) : null}
+                    </button>
+                    <h2 className="text-xl font-semibold text-foreground">{displayName}</h2>
+                    <p className="text-sm mt-0.5 text-muted-foreground">Ваш профиль</p>
+                  </div>
+
+                  {avatarError ? (
+                    <p className="text-destructive text-sm text-center -mt-4 mb-6">{avatarError}</p>
+                  ) : null}
+
+                  <button
+                    type="button"
+                    onClick={() => profile && setShowEditProfileModal(true)}
+                    disabled={!profile}
+                    className="mx-auto mb-2 flex w-full max-w-sm items-center justify-center gap-2 rounded-xl bg-primary py-3 font-medium text-primary-foreground hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-primary/50 disabled:opacity-50"
+                  >
+                    <Pencil size={18} aria-hidden />
+                    Изменить данные
+                  </button>
+
+                  {profile?.birth_date ? (
+                    <div className="mt-5 space-y-2">
+                      <p className="text-sm text-muted-foreground">
+                        Дата рождения: {formatBirthDateWithAge(profile.birth_date)}
+                      </p>
+                    </div>
+                  ) : null}
+
+                  {hasChatKeys === false ? (
+                    <div className="mt-5 rounded-xl border border-amber-500/50 bg-amber-500/10 p-4 text-sm text-foreground">
+                      <p className="font-medium text-amber-700 dark:text-amber-400">Нет ключей для чата</p>
+                      <p className="mt-1 text-muted-foreground">
+                        Ключи шифрования создаются при регистрации в этом приложении. Без них нельзя расшифровать сообщения. Войдите на устройстве, где регистрировались, или зарегистрируйтесь заново.
+                      </p>
+                    </div>
+                  ) : null}
+
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setShowLogoutModal(true);
+                    }}
+                    className="mt-6 flex w-full items-center justify-center gap-2 rounded-xl border border-border bg-muted/25 px-4 py-3 text-muted-foreground hover:bg-muted/45 transition-colors"
+                  >
+                    <LogOut size={20} />
+                    <span>Выйти</span>
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
         </Layout>
 
-        <AvatarUploadModal
+        <ProfileEditModal
+          isOpen={showEditProfileModal}
+          onClose={() => setShowEditProfileModal(false)}
+          source={profile}
+          onSaved={(data) => {
+            const p = meToProfile(data);
+            setProfile(p);
+            void updateUser({ name: p.name });
+          }}
+        />
+
+        <AttachFileModal
           isOpen={showAvatarModal}
           onClose={() => setShowAvatarModal(false)}
           onTakePhoto={() => photoInputRef.current?.click()}
           onUploadFile={() => fileInputRef.current?.click()}
+          onImageFile={(file) => void ingestAvatarFile(file)}
         />
 
         <input
@@ -465,22 +291,9 @@ export default function ProfilePage() {
           className="hidden"
           onChange={async (e) => {
             const f = e.target.files?.[0];
-            // сбрасываем инпут, чтобы можно было выбрать один и тот же файл повторно
             e.currentTarget.value = "";
             if (!f) return;
-
-            try {
-              setAvatarError(null);
-              setIsUploadingAvatar(true);
-              if (f.size > 10 * 1024 * 1024) throw new Error("Файл слишком большой (макс 10MB)");
-              const dataUrl = await fileToAvatarDataUrl(f);
-              await saveAvatar(dataUrl);
-              setShowAvatarModal(false);
-            } catch (err) {
-              setAvatarError(err instanceof Error ? err.message : "Ошибка загрузки аватара");
-            } finally {
-              setIsUploadingAvatar(false);
-            }
+            await ingestAvatarFile(f);
           }}
         />
 
@@ -493,19 +306,7 @@ export default function ProfilePage() {
             const f = e.target.files?.[0];
             e.currentTarget.value = "";
             if (!f) return;
-
-            try {
-              setAvatarError(null);
-              setIsUploadingAvatar(true);
-              if (f.size > 10 * 1024 * 1024) throw new Error("Файл слишком большой (макс 10MB)");
-              const dataUrl = await fileToAvatarDataUrl(f);
-              await saveAvatar(dataUrl);
-              setShowAvatarModal(false);
-            } catch (err) {
-              setAvatarError(err instanceof Error ? err.message : "Ошибка загрузки аватара");
-            } finally {
-              setIsUploadingAvatar(false);
-            }
+            await ingestAvatarFile(f);
           }}
         />
 
@@ -520,26 +321,5 @@ export default function ProfilePage() {
         />
       </>
     </AuthGuard>
-  );
-}
-
-function InfoRow({
-  label,
-  value,
-  icon,
-}: {
-  label: string;
-  value: string | undefined;
-  icon?: React.ReactNode;
-}) {
-  const display = (value?.trim() ?? "") || "—";
-  return (
-    <div className="flex justify-between items-center gap-4 px-4 py-3">
-      <dt className="flex items-center gap-2 text-sm text-muted-foreground shrink-0">
-        {icon}
-        <span>{label}</span>
-      </dt>
-      <dd className="text-foreground text-right truncate">{display}</dd>
-    </div>
   );
 }

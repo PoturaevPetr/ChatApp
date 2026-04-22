@@ -4,7 +4,8 @@ import { create } from "zustand";
 import { getValidAuthTokens } from "@/lib/validAuthToken";
 import { getChatKeys } from "@/lib/secureStorage";
 import { getRooms, createRoom } from "@/services/chatRoomsApi";
-import { getMessages, getMessage } from "@/services/chatMessagesApi";
+import { getMessages, getMessage, markMessageAsRead, type MessageResponse } from "@/services/chatMessagesApi";
+import { getReactionsBatch } from "@/services/chatReactionsApi";
 import { decryptMessage } from "@/lib/decryptMessage";
 import { chatWebSocket } from "@/services/chatWebSocket";
 import {
@@ -21,6 +22,14 @@ import {
 import { encryptAttachmentBytes } from "@/lib/fileCrypto";
 import { uploadRoomAttachments } from "@/services/chatAttachmentsApi";
 import { clearAttachmentMediaCache } from "@/lib/attachmentMediaCache";
+import { encryptMessagePayloadForChatService } from "@/lib/chatE2E";
+import { getMyKeypair, getPublicKey } from "@/services/chatKeysApi";
+import { clearChatsListCache, readChatsListCache, writeChatsListCache } from "@/lib/chatsListCache";
+import {
+  clearThreadMessagesCacheForUser,
+  readThreadMessagesCache,
+  scheduleThreadMessagesCacheWrite,
+} from "@/lib/threadMessagesCache";
 
 export interface ChatUser {
   id: string;
@@ -47,7 +56,14 @@ export interface ChatMessageFile {
   mimeType: string;
   data: string; // base64; пусто если загрузка по REST (file_ref)
   file_ref?: ChatMessageFileRef;
+  /** Только клиент: исходный File до чтения в base64 (нативный выбор файла и т.п.). */
+  nativeFile?: File;
+  /** Локальный object/blob URL для превью до загрузки. */
+  localPreviewUrl?: string | null;
 }
+
+/** Вложение в sendMessage: полное тело или только nativeFile (дополним внутри стора). */
+export type SendMessageFileArg = ChatMessageFile | { nativeFile: File };
 
 /** Ссылка на сообщение, на которое отвечаем (хранится в теле сообщения, без изменений БД). */
 export interface ReplyTo {
@@ -59,6 +75,12 @@ export type ChatMessageContent =
   | { type: "text"; text: string; reply_to?: ReplyTo }
   | { type: "file"; text?: string; file: ChatMessageFile; reply_to?: ReplyTo };
 
+/** Реакция на сообщение (одна на пользователя в комнате, см. API). */
+export interface MessageReaction {
+  userId: string;
+  emoji: string;
+}
+
 export interface ChatMessage {
   id: string;
   senderId: string;
@@ -67,6 +89,7 @@ export interface ChatMessage {
   timestamp: string;
   status: "sent" | "delivered" | "read";
   isOwn: boolean;
+  reactions?: MessageReaction[];
   /** Локальный статус загрузки вложения (optimistic UI, не хранится на сервере). */
   isUploading?: boolean;
   /** 0..100, только локально для индикатора загрузки. */
@@ -81,21 +104,92 @@ export interface ChatListItem {
   lastMessage: ChatMessage | null;
   unreadCount: number;
   updatedAt: string;
+  /** Для превью последнего сообщения в списке чатов */
+  roomType?: "direct" | "group";
+  /** Группа: id пользователя (lowercase) → только имя (для превью последнего сообщения в списке) */
+  memberShortNameByUserId?: Record<string, string>;
+  /** Группа: кто создал (для UI шапки чата). */
+  groupCreatedBy?: string | null;
+  /** Группа: участники для аватаров реакций и т.п. */
+  groupMembers?: { id: string; avatar?: string | null }[];
 }
 
 function threadId(a: string, b: string): string {
   return [a, b].sort().join("_");
 }
 
+/** Синтетический peer id для групповой комнаты (см. `/chat?roomId=…`). Не путать с UUID пользователя. */
+const GROUP_THREAD_PEER_PREFIX = "g:";
+
+export function groupSyntheticPeerId(roomId: string): string {
+  return `${GROUP_THREAD_PEER_PREFIX}${String(roomId ?? "").trim()}`;
+}
+
+export function isGroupThreadPeerId(peerId: string | null | undefined): boolean {
+  if (peerId == null) return false;
+  return String(peerId).startsWith(GROUP_THREAD_PEER_PREFIX);
+}
+
+const UUID_V4_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/** room_id из синтетического peer группы `g:{uuid}` или из списка чатов. */
+function resolveRoomIdForThreadPeer(chats: ChatListItem[], otherUserId: string): string | null {
+  const otherLower = otherUserId.toLowerCase();
+  const fromList = chats.find((c) => String(c.otherUser.id).toLowerCase() === otherLower)?.id ?? null;
+  if (fromList) return fromList;
+  if (isGroupThreadPeerId(otherUserId)) {
+    const tail = otherUserId.slice(GROUP_THREAD_PEER_PREFIX.length).trim();
+    if (UUID_V4_RE.test(tail)) return tail;
+  }
+  return null;
+}
+
 let loadChatsPromise: Promise<void> | null = null;
 let loadMessagesPromise: Promise<void> | null = null;
 let loadMessagesThreadId: string | null = null;
 
+/** Авто-сброс индикатора «собеседник печатает», если не пришёл is_typing: false. */
+let peerTypingAutoClearTimer: ReturnType<typeof setTimeout> | null = null;
+
+function cancelPeerTypingAutoClear(): void {
+  if (peerTypingAutoClearTimer != null) {
+    clearTimeout(peerTypingAutoClearTimer);
+    peerTypingAutoClearTimer = null;
+  }
+}
+
+function schedulePeerTypingAutoClear(
+  roomId: string,
+  userId: string,
+  get: () => ChatState,
+  set: (s: Partial<ChatState> | ((prev: ChatState) => Partial<ChatState>)) => void,
+): void {
+  cancelPeerTypingAutoClear();
+  peerTypingAutoClearTimer = setTimeout(() => {
+    peerTypingAutoClearTimer = null;
+    const p = get().peerTyping;
+    if (p && p.roomId === roomId && p.userId === userId) {
+      set({ peerTyping: null });
+    }
+  }, 4000);
+}
+
 const INITIAL_MESSAGES_LIMIT = 50;
+const LOAD_OLDER_MESSAGES_LIMIT = 20;
 
 function displayNameForUserId(userId: string): string {
   const short = String(userId).slice(0, 8);
   return short ? `Пользователь ${short}` : "Пользователь";
+}
+
+function memberFirstNameForGroupListPreview(u: {
+  id: string;
+  first_name?: string;
+}): string {
+  const first = (u.first_name ?? "").trim();
+  if (first) return first;
+  return displayNameForUserId(u.id);
 }
 
 /** Собирает контент сообщения из расшифрованного JSON (inline file, file_ref или текст). */
@@ -162,6 +256,173 @@ export function buildMessageContentFromDecrypt(content: Record<string, unknown> 
   return { type: "text", text, reply_to: replyTo };
 }
 
+type ChatStoreGetSet = {
+  get: () => ChatState;
+  set: (s: Partial<ChatState> | ((prev: ChatState) => Partial<ChatState>)) => void;
+};
+
+function persistActiveThreadSnapshot(
+  get: () => ChatState,
+  immediate?: boolean,
+  userIdForCache?: string | null,
+): void {
+  const uid = (userIdForCache?.trim() || get().chatsLoadedForUserId)?.trim();
+  const tid = get().activeChatId;
+  if (!uid || !tid) return;
+  const s = get();
+  scheduleThreadMessagesCacheWrite(
+    uid,
+    tid,
+    {
+      roomId: s.activeRoomId,
+      messages: s.activeChatMessages as unknown[],
+      activeChatNextOffset: s.activeChatNextOffset,
+      activeChatHasMoreOlder: s.activeChatHasMoreOlder,
+    },
+    immediate === true,
+  );
+}
+
+function mergeOneUserReaction(
+  prev: MessageReaction[] | undefined,
+  userId: string,
+  emoji: string,
+  removed: boolean,
+): MessageReaction[] {
+  const u = userId.trim().toLowerCase();
+  const base = (prev ?? []).filter((r) => String(r.userId).trim().toLowerCase() !== u);
+  if (removed) return base;
+  return [...base, { userId, emoji }];
+}
+
+function patchMessageReactions(
+  m: ChatMessage,
+  messageId: string,
+  userId: string,
+  emoji: string,
+  removed: boolean,
+): ChatMessage {
+  if (m.id !== messageId) return m;
+  return { ...m, reactions: mergeOneUserReaction(m.reactions, userId, emoji, removed) };
+}
+
+async function mergeReactionsFromBatch(
+  accessToken: string,
+  roomId: string,
+  activeThreadId: string,
+  messageIds: string[],
+  get: () => ChatState,
+  set: (s: Partial<ChatState> | ((prev: ChatState) => Partial<ChatState>)) => void,
+): Promise<void> {
+  const ids = messageIds.filter((id) => id && !id.startsWith("msg_"));
+  if (!ids.length) return;
+  try {
+    const batch = await getReactionsBatch(accessToken, roomId, ids);
+    if (get().activeChatId !== activeThreadId) return;
+    set((s) => ({
+      activeChatMessages: s.activeChatMessages.map((m) => {
+        const rows = batch[m.id];
+        if (rows === undefined) return m;
+        return { ...m, reactions: rows };
+      }),
+    }));
+  } catch {
+    //
+  }
+}
+
+async function buildChatMessagesFromApiResponses(
+  forThisChat: MessageResponse[],
+  me: string,
+  accessToken: string,
+  keys: { private_key: string },
+  loadedForThread: string,
+  { get, set }: ChatStoreGetSet,
+): Promise<ChatMessage[]> {
+  const needFullFetch = forThisChat.filter(
+    (m) => m.has_attachment && (!m.encrypted_data || !m.nonce),
+  );
+
+  const decrypted = await Promise.all(
+    forThisChat.map(async (m) => {
+      const hasPlaceholder = needFullFetch.some((f) => String(f.message_id) === String(m.message_id));
+      if (hasPlaceholder) {
+        return {
+          id: String(m.message_id),
+          senderId: String(m.sender_id),
+          recipientId: m.recipient_id ?? "",
+          content: {
+            type: "file" as const,
+            file: {
+              name: "Файл",
+              mimeType: "application/octet-stream",
+              data: "",
+            },
+          },
+          timestamp: m.sent_at,
+          status: (m.is_read ? "read" : "delivered") as "read" | "delivered",
+          isOwn: String(m.sender_id).toLowerCase() === me,
+        };
+      }
+      const content = await decryptMessage(
+        m.encrypted_data!,
+        m.encrypted_aes_key,
+        m.nonce!,
+        keys.private_key,
+      );
+      const messageContent = buildMessageContentFromDecrypt(content as Record<string, unknown> | null);
+      return {
+        id: String(m.message_id),
+        senderId: String(m.sender_id),
+        recipientId: m.recipient_id ?? "",
+        content: messageContent,
+        timestamp: m.sent_at,
+        status: (m.is_read ? "read" : "delivered") as "read" | "delivered",
+        isOwn: String(m.sender_id).toLowerCase() === me,
+      };
+    }),
+  );
+
+  decrypted.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+  if (needFullFetch.length === 0) return decrypted;
+
+  needFullFetch.forEach((m) => {
+    const messageId = String(m.message_id);
+    getMessage(accessToken, messageId).then((full) => {
+      if (!full || get().activeChatId !== loadedForThread) return;
+      decryptMessage(
+        full.encrypted_data,
+        full.encrypted_aes_key,
+        full.nonce,
+        keys.private_key,
+      )
+        .then((content) => {
+          if (!content || get().activeChatId !== loadedForThread) return;
+          const messageContent = buildMessageContentFromDecrypt(content as Record<string, unknown> | null);
+          const updated: ChatMessage = {
+            id: messageId,
+            senderId: String(full.sender_id),
+            recipientId: full.recipient_id ?? "",
+            content: messageContent,
+            timestamp: full.sent_at,
+            status: full.is_read ? "read" : "delivered",
+            isOwn: String(full.sender_id).toLowerCase() === me,
+          };
+          set((s) => ({
+            activeChatMessages: s.activeChatMessages.map((msg) =>
+              msg.id === messageId ? updated : msg,
+            ),
+          }));
+          queueMicrotask(() => persistActiveThreadSnapshot(get, false));
+        })
+        .catch(() => {});
+    });
+  });
+
+  return decrypted;
+}
+
 async function runLoadMessagesInner(
   currentUserId: string,
   otherUserId: string,
@@ -170,11 +431,12 @@ async function runLoadMessagesInner(
   keys: { private_key: string } | null,
   tid: string,
   silentRefresh: boolean,
-  get: () => { activeChatId: string | null },
+  get: () => ChatState,
   set: (s: Partial<ChatState> | ((prev: ChatState) => Partial<ChatState>)) => void,
 ): Promise<void> {
   const me = currentUserId.toLowerCase();
   const other = otherUserId.toLowerCase();
+  const gs: ChatStoreGetSet = { get, set };
   try {
     const apiMessages = await getMessages(
       accessToken,
@@ -195,106 +457,77 @@ async function runLoadMessagesInner(
 
     if (!keys?.private_key) {
       if (!silentRefresh) {
+        const disk = await readThreadMessagesCache(currentUserId, tid);
+        if (disk?.messages?.length && get().activeChatId === tid) {
+          set({
+            activeChatMessages: disk.messages as ChatMessage[],
+            isMessagesLoading: false,
+            error: null,
+            activeChatNextOffset: disk.activeChatNextOffset,
+            activeChatHasMoreOlder: disk.activeChatHasMoreOlder,
+          });
+          return;
+        }
         set({
           activeChatMessages: [],
           isMessagesLoading: false,
           error: "Нет ключа расшифровки. Войдите заново или зарегистрируйтесь в приложении.",
+          activeChatNextOffset: 0,
+          activeChatHasMoreOlder: false,
         });
       }
       return;
     }
 
-    const needFullFetch = forThisChat.filter(
-      (m) => m.has_attachment && (!m.encrypted_data || !m.nonce),
-    );
-
-    const decrypted = await Promise.all(
-      forThisChat.map(async (m) => {
-        const hasPlaceholder = needFullFetch.some((f) => String(f.message_id) === String(m.message_id));
-        if (hasPlaceholder) {
-          return {
-            id: String(m.message_id),
-            senderId: String(m.sender_id),
-            recipientId: m.recipient_id ?? "",
-            content: {
-              type: "file" as const,
-              file: {
-                name: "Файл",
-                mimeType: "application/octet-stream",
-                data: "",
-              },
-            },
-            timestamp: m.sent_at,
-            status: (m.is_read ? "read" : "delivered") as "read" | "delivered",
-            isOwn: String(m.sender_id).toLowerCase() === me,
-          };
-        }
-        const content = await decryptMessage(
-          m.encrypted_data!,
-          m.encrypted_aes_key,
-          m.nonce!,
-          keys.private_key,
-        );
-        const messageContent = buildMessageContentFromDecrypt(content as Record<string, unknown> | null);
-        return {
-          id: String(m.message_id),
-          senderId: String(m.sender_id),
-          recipientId: m.recipient_id ?? "",
-          content: messageContent,
-          timestamp: m.sent_at,
-          status: (m.is_read ? "read" : "delivered") as "read" | "delivered",
-          isOwn: String(m.sender_id).toLowerCase() === me,
-        };
-      }),
-    );
-
-    decrypted.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-
     const loadedForThread = threadId(currentUserId, otherUserId);
+    const decrypted = await buildChatMessagesFromApiResponses(
+      forThisChat,
+      me,
+      accessToken,
+      keys,
+      loadedForThread,
+      gs,
+    );
+
+    const pageLen = apiMessages.length;
+    const hasMoreOlder = pageLen === INITIAL_MESSAGES_LIMIT;
+
     if (get().activeChatId === loadedForThread) {
-      set({ activeChatMessages: decrypted, isMessagesLoading: false, error: null });
+      set({
+        activeChatMessages: decrypted,
+        isMessagesLoading: false,
+        error: null,
+        /** Смещение по ответу API (глобальная лента без room_id — не длина отфильтрованного списка). */
+        activeChatNextOffset: pageLen,
+        activeChatHasMoreOlder: hasMoreOlder,
+      });
+      queueMicrotask(() => persistActiveThreadSnapshot(get, true, currentUserId));
+      if (roomId) {
+        void mergeReactionsFromBatch(accessToken, roomId, loadedForThread, decrypted.map((m) => m.id), get, set);
+      }
     } else {
       set({ isMessagesLoading: false });
     }
-
-    if (needFullFetch.length === 0) return;
-
-    needFullFetch.forEach((m) => {
-      const messageId = String(m.message_id);
-      getMessage(accessToken, messageId).then((full) => {
-        if (!full || get().activeChatId !== loadedForThread) return;
-        decryptMessage(
-          full.encrypted_data,
-          full.encrypted_aes_key,
-          full.nonce,
-          keys!.private_key,
-        ).then((content) => {
-          if (!content || get().activeChatId !== loadedForThread) return;
-          const messageContent = buildMessageContentFromDecrypt(content as Record<string, unknown> | null);
-          const updated: ChatMessage = {
-            id: messageId,
-            senderId: String(full.sender_id),
-            recipientId: full.recipient_id ?? "",
-            content: messageContent,
-            timestamp: full.sent_at,
-            status: full.is_read ? "read" : "delivered",
-            isOwn: String(full.sender_id).toLowerCase() === me,
-          };
-          set((s) => ({
-            activeChatMessages: s.activeChatMessages.map((msg) =>
-              msg.id === messageId ? updated : msg,
-            ),
-          }));
-        }).catch(() => {});
-      });
-    });
   } catch (e) {
     console.warn("loadMessages from API failed:", e);
+    const disk = await readThreadMessagesCache(currentUserId, tid);
+    if (!silentRefresh && disk?.messages?.length && get().activeChatId === tid) {
+      set({
+        activeChatMessages: disk.messages as ChatMessage[],
+        isMessagesLoading: false,
+        error: null,
+        activeChatNextOffset: disk.activeChatNextOffset,
+        activeChatHasMoreOlder: disk.activeChatHasMoreOlder,
+      });
+      return;
+    }
     if (!silentRefresh) {
       set({
         activeChatMessages: [],
         isMessagesLoading: false,
         error: e instanceof Error ? e.message : "Не удалось загрузить сообщения",
+        activeChatNextOffset: 0,
+        activeChatHasMoreOlder: false,
       });
     }
   }
@@ -313,21 +546,33 @@ interface ChatState {
   activeChatId: string | null;
   activeRoomId: string | null;
   activeChatMessages: ChatMessage[];
+  /** Следующий offset для GET /messages (порядок sent_at desc на сервере). */
+  activeChatNextOffset: number;
+  /** Есть ли ещё более старые сообщения для подгрузки при скролле вверх. */
+  activeChatHasMoreOlder: boolean;
+  isLoadingOlderMessages: boolean;
   activeChatUser: ChatUser | null;
   isLoading: boolean;
   isMessagesLoading: boolean;
   isSending: boolean;
+  /** Запрос свежего списка чатов с сервера (GET rooms + расшифровка превью); для шапки «Обновление». */
+  isFetchingChatList: boolean;
   error: string | null;
+  /** user_typing в текущей комнате (до таймаута или is_typing: false). */
+  peerTyping: { roomId: string; userId: string; until: number } | null;
+  setPeerTyping: (roomId: string, userId: string, isTyping: boolean) => void;
   loadUsers: () => void;
   loadChats: (currentUserId: string, options?: LoadChatsOptions) => Promise<void>;
   /** Сброс чата при выходе из аккаунта */
   resetSession: () => void;
   loadMessages: (currentUserId: string, otherUserId: string, silentRefresh?: boolean) => Promise<void>;
+  /** Подгрузить более старые сообщения (по 20) при скролле к верху ленты. */
+  loadOlderMessages: (currentUserId: string) => Promise<void>;
   sendMessage: (
     currentUserId: string,
     recipientId: string,
     text: string,
-    file?: ChatMessageFile,
+    file?: SendMessageFileArg,
     replyTo?: ReplyTo
   ) => Promise<ChatMessage | null>;
   setActiveChat: (currentUserId: string, otherUser: ChatUser) => void;
@@ -351,6 +596,16 @@ interface ChatState {
   markOwnMessageReadByPeer: (messageId: string) => void;
   /** Убрать сообщение из активного треда и обновить превью в списке чатов (после DELETE на сервере или по WebSocket message_deleted). */
   removeMessageFromActiveChat: (messageId: string) => void;
+  /** WebSocket message_reaction или ответ POST /reactions — обновить чипы в ленте и в превью списка. */
+  applyMessageReaction: (payload: {
+    roomId: string;
+    messageId: string;
+    userId: string;
+    emoji: string;
+    removed: boolean;
+  }) => void;
+  /** Участника удалили из комнаты (WS room_member_removed). */
+  applyRoomMemberRemoved: (roomId: string, removedUserId: string, currentUserId: string) => void;
   /** События user_online / user_offline для подписи «в сети» / last seen. */
   updatePeerPresence: (userId: string, online: boolean, atIso?: string) => void;
 }
@@ -362,11 +617,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
   activeChatId: null,
   activeRoomId: null,
   activeChatMessages: [],
+  activeChatNextOffset: 0,
+  activeChatHasMoreOlder: false,
+  isLoadingOlderMessages: false,
   activeChatUser: null,
   isLoading: false,
   isMessagesLoading: false,
   isSending: false,
+  isFetchingChatList: false,
   error: null,
+  peerTyping: null,
 
   loadUsers: () => {
     const list = getDemoUsers().map((u) => ({ id: u.id, name: u.name, avatar: u.avatar ?? null }));
@@ -374,10 +634,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   resetSession: () => {
+    const uid = get().chatsLoadedForUserId;
     loadChatsPromise = null;
     loadMessagesPromise = null;
     loadMessagesThreadId = null;
     clearAttachmentMediaCache();
+    void clearChatsListCache();
+    if (uid) void clearThreadMessagesCacheForUser(uid);
+    cancelPeerTypingAutoClear();
     set({
       users: [],
       chats: [],
@@ -385,11 +649,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       activeChatId: null,
       activeRoomId: null,
       activeChatMessages: [],
+      activeChatNextOffset: 0,
+      activeChatHasMoreOlder: false,
+      isLoadingOlderMessages: false,
       activeChatUser: null,
       isLoading: false,
       isMessagesLoading: false,
       isSending: false,
+      isFetchingChatList: false,
       error: null,
+      peerTyping: null,
     });
   },
 
@@ -404,12 +673,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (prevLoadedFor !== null && prevLoadedFor !== currentUserId) {
         set({ chats: [], chatsLoadedForUserId: null });
       }
-      const hasUsableCache =
-        !force &&
-        get().chatsLoadedForUserId === currentUserId &&
-        get().chats.length > 0;
 
-      if (!hasUsableCache) {
+      /** Cold start / после перезапуска: показать последний сохранённый список без пустого экрана. */
+      if (typeof window !== "undefined") {
+        const disk = await readChatsListCache(currentUserId);
+        if (disk && disk.length > 0 && get().chats.length === 0) {
+          set({
+            chats: disk as ChatListItem[],
+            chatsLoadedForUserId: currentUserId,
+            isLoading: false,
+            error: null,
+          });
+        }
+      }
+
+      const hasRowsForUser =
+        get().chats.length > 0 && get().chatsLoadedForUserId === currentUserId;
+      if (!hasRowsForUser) {
         set({ isLoading: true, error: null });
       } else {
         set({ error: null, isLoading: false });
@@ -418,9 +698,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       try {
         const tokens = await getValidAuthTokens();
         if (!tokens?.access_token) {
-          set({ chats: [], chatsLoadedForUserId: null, isLoading: false });
+          set({ chats: [], chatsLoadedForUserId: null, isLoading: false, isFetchingChatList: false });
           return;
         }
+        set({ isFetchingChatList: true });
         const currentId = currentUserId.toLowerCase();
         const keys = await getChatKeys();
         const rooms = await getRooms(tokens.access_token);
@@ -430,16 +711,39 @@ export const useChatStore = create<ChatState>((set, get) => ({
           rooms.map(async (room): Promise<ChatListItem | null> => {
             const other = room.users.find((u) => String(u.id).toLowerCase() !== currentId);
             if (!other) return null;
-            const parts = [other.last_name, other.first_name, other.middle_name].filter(Boolean) as string[];
-            const displayName = parts.length > 0 ? parts.join(" ").trim() : (room.name || displayNameForUserId(other.id));
-            const prev = prevChats.find((c) => c.id === room.id || c.otherUser.id === other.id);
-            const otherUser: ChatUser = {
-              id: other.id,
-              name: displayName,
-              avatar: other.avatar ?? null,
-              lastSeenAt: other.last_seen_at ?? prev?.otherUser.lastSeenAt ?? null,
-              isOnline: prev?.otherUser.isOnline,
-            };
+            const isGroup =
+              String(room.room_type ?? "").toLowerCase() === "group" ||
+              (Array.isArray(room.users) && room.users.length > 2);
+
+            const memberShortNameByUserId: Record<string, string> = {};
+            for (const u of room.users) {
+              memberShortNameByUserId[String(u.id).toLowerCase()] = memberFirstNameForGroupListPreview(u);
+            }
+
+            let otherUser: ChatUser;
+            if (isGroup) {
+              const prev = prevChats.find((c) => c.id === room.id);
+              const title = (room.name && String(room.name).trim()) || "Группа";
+              otherUser = {
+                id: groupSyntheticPeerId(room.id),
+                name: title,
+                avatar: room.avatar ?? prev?.otherUser.avatar ?? null,
+                lastSeenAt: prev?.otherUser.lastSeenAt ?? null,
+                isOnline: prev?.otherUser.isOnline,
+              };
+            } else {
+              const parts = [other.last_name, other.first_name, other.middle_name].filter(Boolean) as string[];
+              const displayName =
+                parts.length > 0 ? parts.join(" ").trim() : (room.name || displayNameForUserId(other.id));
+              const prev = prevChats.find((c) => c.id === room.id || c.otherUser.id === other.id);
+              otherUser = {
+                id: other.id,
+                name: displayName,
+                avatar: other.avatar ?? null,
+                lastSeenAt: other.last_seen_at ?? prev?.otherUser.lastSeenAt ?? null,
+                isOnline: prev?.otherUser.isOnline,
+              };
+            }
             let lastMessage: ChatMessage | null = null;
             let updatedAt = room.created_at ?? new Date().toISOString();
             const unreadCount = typeof (room as unknown as { unread_count?: unknown }).unread_count === "number" ? (room as unknown as { unread_count: number }).unread_count : 0;
@@ -469,6 +773,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
               lastMessage,
               unreadCount,
               updatedAt,
+              roomType: isGroup ? ("group" as const) : ("direct" as const),
+              memberShortNameByUserId: isGroup ? memberShortNameByUserId : undefined,
+              groupMembers: isGroup
+                ? room.users.map((u) => ({ id: String(u.id), avatar: u.avatar ?? null }))
+                : undefined,
             };
           })
         );
@@ -478,6 +787,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
 
         set({ chats, isLoading: false, error: null, chatsLoadedForUserId: currentUserId });
+        void writeChatsListCache(currentUserId, chats);
 
         const activeUser = get().activeChatUser;
         if (activeUser) {
@@ -506,6 +816,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
       } finally {
         loadChatsPromise = null;
+        set({ isFetchingChatList: false });
       }
     })();
     await loadChatsPromise;
@@ -516,7 +827,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     if (silentRefresh) {
       const chats = get().chats;
-      const roomId = chats.find((c) => c.otherUser.id === otherUserId)?.id ?? null;
+      const roomId = resolveRoomIdForThreadPeer(chats, otherUserId);
       const tokens = await getValidAuthTokens();
       if (!tokens?.access_token) return;
       const keys = await getChatKeys();
@@ -541,24 +852,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
     loadMessagesThreadId = tid;
     loadMessagesPromise = (async () => {
+      const diskCache =
+        typeof window !== "undefined" ? await readThreadMessagesCache(currentUserId, tid) : null;
       try {
-        const otherLower = otherUserId.toLowerCase();
         const chats = get().chats;
-        let roomId = chats.find((c) => String(c.otherUser.id).toLowerCase() === otherLower)?.id ?? null;
+        let roomId = resolveRoomIdForThreadPeer(chats, otherUserId);
 
         const tokens = await getValidAuthTokens();
-        if (!tokens?.access_token) {
-          set({ activeChatMessages: [], isMessagesLoading: false });
-          return;
-        }
-        if (!roomId) {
-          const rooms = await getRooms(tokens.access_token);
-          const room = rooms.find((r) =>
-            r.users.some((u) => String(u.id).toLowerCase() === otherLower)
-          );
-          if (room) roomId = room.id;
-        }
-
+        const otherLower = otherUserId.toLowerCase();
         const otherUser =
           get().users.find((u) => String(u.id).toLowerCase() === otherLower) ||
           chats.find((c) => String(c.otherUser.id).toLowerCase() === otherLower)?.otherUser || {
@@ -566,34 +867,71 @@ export const useChatStore = create<ChatState>((set, get) => ({
             name: displayNameForUserId(otherUserId),
             avatar: null as string | null,
           };
+        const activeChatUserResolved =
+          typeof otherUser === "object" && "id" in otherUser
+            ? {
+                id: otherUser.id,
+                name: otherUser.name,
+                avatar: otherUser.avatar ?? null,
+                lastSeenAt: otherUser.lastSeenAt ?? null,
+                isOnline: otherUser.isOnline,
+              }
+            : { id: otherUserId, name: displayNameForUserId(otherUserId), avatar: null };
+
+        if (!tokens?.access_token) {
+          cancelPeerTypingAutoClear();
+          set({
+            activeChatId: tid,
+            activeRoomId: roomId ?? diskCache?.roomId ?? null,
+            activeChatMessages: (diskCache?.messages as ChatMessage[]) ?? [],
+            activeChatNextOffset: diskCache?.activeChatNextOffset ?? 0,
+            activeChatHasMoreOlder: diskCache?.activeChatHasMoreOlder ?? false,
+            isLoadingOlderMessages: false,
+            isMessagesLoading: false,
+            error: null,
+            activeChatUser: activeChatUserResolved,
+            peerTyping: null,
+          });
+          return;
+        }
+        if (!roomId) {
+          try {
+            const rooms = await getRooms(tokens.access_token);
+            const room = rooms.find((r) =>
+              r.users.some((u) => String(u.id).toLowerCase() === otherLower)
+            );
+            if (room) roomId = room.id;
+          } catch (e) {
+            console.warn("getRooms in loadMessages failed:", e);
+            roomId = diskCache?.roomId ?? null;
+          }
+        }
+
+        const effectiveRoomId = roomId ?? diskCache?.roomId ?? null;
+        cancelPeerTypingAutoClear();
         set({
           activeChatId: tid,
-          activeRoomId: roomId,
-          activeChatMessages: [],
+          activeRoomId: effectiveRoomId,
+          activeChatMessages: (diskCache?.messages as ChatMessage[]) ?? [],
+          activeChatNextOffset: diskCache?.activeChatNextOffset ?? 0,
+          activeChatHasMoreOlder: diskCache?.activeChatHasMoreOlder ?? false,
+          isLoadingOlderMessages: false,
           isMessagesLoading: true,
           error: null,
-          activeChatUser:
-            typeof otherUser === "object" && "id" in otherUser
-              ? {
-                  id: otherUser.id,
-                  name: otherUser.name,
-                  avatar: otherUser.avatar ?? null,
-                  lastSeenAt: otherUser.lastSeenAt ?? null,
-                  isOnline: otherUser.isOnline,
-                }
-              : { id: otherUserId, name: displayNameForUserId(otherUserId), avatar: null },
+          activeChatUser: activeChatUserResolved,
+          peerTyping: null,
         });
-        if (roomId && chatWebSocket.isConnected()) {
-          console.log("[Chat] Вход в чат: room_id=", roomId, "otherUser=", otherUserId?.slice(0, 8) + "...");
-          chatWebSocket.send({ type: "join_room", data: { room_id: roomId } });
-        } else if (roomId) {
-          console.log("[Chat] Вход в чат: room_id=", roomId, "— WebSocket не подключён, join_room отправится при подключении");
+        if (effectiveRoomId && chatWebSocket.isConnected()) {
+          console.log("[Chat] Вход в чат: room_id=", effectiveRoomId, "otherUser=", otherUserId?.slice(0, 8) + "...");
+          chatWebSocket.send({ type: "join_room", data: { room_id: effectiveRoomId } });
+        } else if (effectiveRoomId) {
+          console.log("[Chat] Вход в чат: room_id=", effectiveRoomId, "— WebSocket не подключён, join_room отправится при подключении");
         }
         const keys = await getChatKeys();
         await runLoadMessagesInner(
           currentUserId,
           otherUserId,
-          roomId,
+          effectiveRoomId,
           tokens.access_token,
           keys,
           tid,
@@ -611,13 +949,104 @@ export const useChatStore = create<ChatState>((set, get) => ({
     await loadMessagesPromise;
   },
 
+  loadOlderMessages: async (currentUserId: string) => {
+    const state = get();
+    const otherUser = state.activeChatUser;
+    if (!otherUser?.id || !state.activeChatId) return;
+    if (state.isLoadingOlderMessages || !state.activeChatHasMoreOlder) return;
+    if (state.isMessagesLoading) return;
+
+    const tokens = await getValidAuthTokens();
+    if (!tokens?.access_token) return;
+    const keys = await getChatKeys();
+    if (!keys?.private_key) return;
+
+    const me = currentUserId.toLowerCase();
+    const other = String(otherUser.id).toLowerCase();
+    const roomId = state.activeRoomId;
+    const tid = state.activeChatId;
+    const offset = state.activeChatNextOffset;
+
+    set({ isLoadingOlderMessages: true });
+    try {
+      const apiMessages = await getMessages(
+        tokens.access_token,
+        LOAD_OLDER_MESSAGES_LIMIT,
+        offset,
+        false,
+        roomId ?? undefined,
+        false,
+      );
+      const forThisChat = roomId
+        ? apiMessages
+        : apiMessages.filter((m) => {
+            const sid = String(m.sender_id ?? "").toLowerCase();
+            const rid = String(m.recipient_id ?? "").toLowerCase();
+            return (sid === me && rid === other) || (sid === other && rid === me);
+          });
+
+      const decrypted = await buildChatMessagesFromApiResponses(
+        forThisChat,
+        me,
+        tokens.access_token,
+        keys,
+        tid,
+        { get, set },
+      );
+
+      const newOffset = offset + apiMessages.length;
+      const hasMore = apiMessages.length === LOAD_OLDER_MESSAGES_LIMIT;
+
+      if (get().activeChatId !== tid) return;
+
+      const existingIds = new Set(get().activeChatMessages.map((m) => m.id));
+      const olderAdded = decrypted.filter((m) => !existingIds.has(m.id));
+
+      set((s) => ({
+        activeChatMessages: [...olderAdded, ...s.activeChatMessages],
+        activeChatNextOffset: newOffset,
+        activeChatHasMoreOlder: hasMore,
+      }));
+      queueMicrotask(() => persistActiveThreadSnapshot(get, true));
+      if (roomId && olderAdded.length) {
+        void mergeReactionsFromBatch(
+          tokens.access_token,
+          roomId,
+          tid,
+          olderAdded.map((m) => m.id),
+          get,
+          set,
+        );
+      }
+    } catch (e) {
+      console.warn("loadOlderMessages failed:", e);
+    } finally {
+      set({ isLoadingOlderMessages: false });
+    }
+  },
+
   sendMessage: async (
     currentUserId: string,
     recipientId: string,
     text: string,
-    file?: ChatMessageFile,
+    fileParam?: SendMessageFileArg,
     replyTo?: ReplyTo
   ): Promise<ChatMessage | null> => {
+    let file: ChatMessageFile | undefined;
+    if (fileParam) {
+      if ("nativeFile" in fileParam && fileParam.nativeFile) {
+        const nf = fileParam.nativeFile;
+        const base = fileParam as Partial<ChatMessageFile>;
+        file = {
+          name: base.name && base.name.trim() !== "" ? base.name : nf.name || "file",
+          mimeType: base.mimeType && base.mimeType.trim() !== "" ? base.mimeType : nf.type || "application/octet-stream",
+          data: typeof base.data === "string" ? base.data : "",
+          nativeFile: nf,
+        };
+      } else {
+        file = fileParam as ChatMessageFile;
+      }
+    }
     const state = get();
     const recipientLower = recipientId.toLowerCase();
     let roomId =
@@ -625,12 +1054,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
       state.chats.find((c) => String(c.otherUser.id).toLowerCase() === recipientLower)?.id ??
       null;
 
+    if (!roomId && isGroupThreadPeerId(recipientId)) {
+      const tail = recipientId.slice(GROUP_THREAD_PEER_PREFIX.length).trim();
+      if (UUID_V4_RE.test(tail)) {
+        roomId = tail;
+      }
+    }
+
     if (!roomId) {
       set({ isSending: true });
       try {
         const tokens = await getValidAuthTokens();
         if (!tokens?.access_token) {
           set({ isSending: false });
+          return null;
+        }
+        if (isGroupThreadPeerId(recipientId)) {
+          set({
+            isSending: false,
+            error: "Не удалось определить групповую комнату. Обновите список чатов.",
+          });
           return null;
         }
         const { room_id } = await createRoom(tokens.access_token, recipientId);
@@ -755,8 +1198,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       try {
         setUploadState({ uploadProgress: 15, uploadError: null });
-        const inputBlob = base64ToBlob(file.data, file.mimeType);
-        const prep = await prepareAttachmentForUpload(new File([inputBlob], file.name, { type: file.mimeType }));
+        const inputFile: File =
+          file.nativeFile ??
+          new File([base64ToBlob(file.data, file.mimeType)], file.name, { type: file.mimeType });
+        const prep = await prepareAttachmentForUpload(inputFile);
         setUploadState({ uploadProgress: 35 });
         const encFull = await encryptAttachmentBytes(await prep.full.arrayBuffer());
         const encThumb = prep.thumb ? await encryptAttachmentBytes(await prep.thumb.arrayBuffer()) : null;
@@ -823,12 +1268,81 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
     if (replyTo) payload.reply_to = { id: replyTo.id, preview: replyTo.preview };
 
+    const isPemPublicKey = (k: string | undefined | null): k is string =>
+      typeof k === "string" && k.includes("BEGIN PUBLIC KEY");
+
+    const tokens = await getValidAuthTokens();
+    if (!tokens?.access_token) {
+      set({ error: "Нет авторизации" });
+      return null;
+    }
+
+    const chatRowForSend = roomId ? get().chats.find((c) => c.id === roomId) : undefined;
+    const isGroupSend =
+      isGroupThreadPeerId(recipientId) || chatRowForSend?.roomType === "group";
+
+    const localKeys = await getChatKeys();
+    let senderPublicPem = localKeys?.public_key ?? null;
+    if (!isPemPublicKey(senderPublicPem)) {
+      try {
+        const me = await getMyKeypair(tokens.access_token);
+        senderPublicPem = me.public_key;
+      } catch {
+        senderPublicPem = null;
+      }
+    }
+    if (!isPemPublicKey(senderPublicPem)) {
+      set({ error: "Не удалось получить ключи шифрования" });
+      return null;
+    }
+
+    let e2ePayload: Awaited<ReturnType<typeof encryptMessagePayloadForChatService>>;
+    if (isGroupSend && roomId) {
+      let memberIds = Array.from(
+        new Set((chatRowForSend?.groupMembers ?? []).map((m) => String(m.id)))
+      );
+      if (memberIds.length < 2) {
+        try {
+          const rooms = await getRooms(tokens.access_token);
+          const room = rooms.find((r) => r.id === roomId);
+          memberIds = Array.from(new Set((room?.users ?? []).map((u) => String(u.id))));
+        } catch {
+          memberIds = [];
+        }
+      }
+      if (memberIds.length < 2) {
+        set({ error: "Не удалось определить участников группы для шифрования" });
+        return null;
+      }
+      const readerKeys = await Promise.all(
+        memberIds.map(async (uid) => {
+          const row = await getPublicKey(tokens.access_token, uid);
+          return { userId: uid, publicKeyPem: row.public_key };
+        })
+      );
+      if (readerKeys.some((r) => !isPemPublicKey(r.publicKeyPem))) {
+        set({ error: "Не удалось получить ключи шифрования" });
+        return null;
+      }
+      e2ePayload = await encryptMessagePayloadForChatService(payload, readerKeys);
+    } else {
+      const recipientPublic = await getPublicKey(tokens.access_token, recipientId);
+      if (!isPemPublicKey(recipientPublic.public_key)) {
+        set({ error: "Не удалось получить ключи шифрования" });
+        return null;
+      }
+      e2ePayload = await encryptMessagePayloadForChatService(payload, [
+        { userId: recipientId, publicKeyPem: recipientPublic.public_key },
+        { userId: currentUserId, publicKeyPem: senderPublicPem },
+      ]);
+    }
+
     if (roomId && chatWebSocket.isConnected()) {
       chatWebSocket.send({
         type: "send_message",
         data: {
           room_id: roomId,
-          message: payload,
+          e2e: e2ePayload,
         },
       });
     } else if (roomId) {
@@ -912,6 +1426,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({ chats: reordered });
     }
 
+    queueMicrotask(() => persistActiveThreadSnapshot(get, false));
     return chatMessage;
   },
 
@@ -932,12 +1447,34 @@ export const useChatStore = create<ChatState>((set, get) => ({
       console.log("[Chat] Выход из чата: room_id=", state.activeRoomId);
       chatWebSocket.send({ type: "leave_room", data: { room_id: state.activeRoomId } });
     }
+    cancelPeerTypingAutoClear();
     set({
       activeChatId: null,
       activeRoomId: null,
       activeChatMessages: [],
+      activeChatNextOffset: 0,
+      activeChatHasMoreOlder: false,
+      isLoadingOlderMessages: false,
       activeChatUser: null,
+      peerTyping: null,
     });
+  },
+
+  setPeerTyping: (roomId, userId, isTyping) => {
+    const rid = String(roomId || "").trim();
+    const uid = String(userId || "").trim();
+    if (!rid || !uid) return;
+    if (!isTyping) {
+      cancelPeerTypingAutoClear();
+      set((s) => {
+        const p = s.peerTyping;
+        if (!p || p.roomId !== rid || p.userId !== uid) return {};
+        return { peerTyping: null };
+      });
+      return;
+    }
+    set({ peerTyping: { roomId: rid, userId: uid, until: Date.now() + 4000 } });
+    schedulePeerTypingAutoClear(rid, uid, get, set);
   },
 
   addIncomingWsMessage: (payload) => {
@@ -970,13 +1507,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (!content) return;
       const messageContent = buildMessageContentFromDecrypt(content as Record<string, unknown> | null);
       const isOwnMsg = String(full.sender_id).toLowerCase() === me;
+      const recipientLower = full.recipient_id ? String(full.recipient_id).toLowerCase() : "";
+      const isIncomingToMe = !isOwnMsg && recipientLower === me;
+
+      let displayStatus: ChatMessage["status"] = full.is_read ? "read" : "delivered";
+      if (isForActiveChat && isIncomingToMe && !full.is_read) {
+        try {
+          await markMessageAsRead(tokens.access_token, messageId);
+          displayStatus = "read";
+        } catch {
+          /* сеть/404 — оставляем статус из full */
+        }
+      }
+
       const newMsg: ChatMessage = {
         id: messageId,
         senderId: String(full.sender_id),
         recipientId: full.recipient_id ?? "",
         content: messageContent,
         timestamp: full.sent_at,
-        status: full.is_read ? "read" : "delivered",
+        status: displayStatus,
         isOwn: isOwnMsg,
       };
 
@@ -1009,7 +1559,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
             (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
           );
           set({ activeChatMessages: merged });
+          queueMicrotask(() => persistActiveThreadSnapshot(get, false));
         }
+      }
+      if (roomId && full.sender_id) {
+        get().setPeerTyping(roomId, String(full.sender_id), false);
       }
     })();
   },
@@ -1053,6 +1607,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({
       activeChatMessages: list.map((msg, i) => (i === idx ? updated : msg)),
     });
+    queueMicrotask(() => persistActiveThreadSnapshot(get, false));
     const chats = get().chats;
     const chatIdx = chats.findIndex((c) => c.lastMessage?.id === prev.id);
     if (chatIdx >= 0) {
@@ -1109,6 +1664,47 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
       return { activeChatMessages: nextMsgs, chats };
     });
+    queueMicrotask(() => persistActiveThreadSnapshot(get, false));
+  },
+
+  applyMessageReaction: ({ roomId, messageId, userId, emoji, removed }) => {
+    const rid = String(roomId || "").trim();
+    const mid = String(messageId || "").trim();
+    if (!rid || !mid) return;
+    set((s) => {
+      const nextChats = s.chats.map((c) => {
+        if (c.id !== rid || !c.lastMessage || c.lastMessage.id !== mid) return c;
+        return {
+          ...c,
+          lastMessage: patchMessageReactions(c.lastMessage, mid, userId, emoji, removed),
+        };
+      });
+      if (String(s.activeRoomId ?? "") !== rid) {
+        return { chats: nextChats };
+      }
+      return {
+        activeChatMessages: s.activeChatMessages.map((m) =>
+          patchMessageReactions(m, mid, userId, emoji, removed),
+        ),
+        chats: nextChats,
+      };
+    });
+    if (String(get().activeRoomId ?? "") === rid) {
+      queueMicrotask(() => persistActiveThreadSnapshot(get, false));
+    }
+  },
+
+  applyRoomMemberRemoved: (roomId, removedUserId, currentUserId) => {
+    const rid = String(roomId || "").trim();
+    const uid = String(removedUserId || "").trim().toLowerCase();
+    const me = String(currentUserId || "").trim().toLowerCase();
+    if (!rid || !uid || !me) return;
+    if (uid === me) {
+      get().removeChatByRoomId(rid);
+      if (get().activeRoomId === rid) get().clearActiveChat();
+      return;
+    }
+    void get().loadChats(currentUserId, { force: true });
   },
 
   updatePeerPresence: (userId: string, online: boolean, atIso?: string) => {

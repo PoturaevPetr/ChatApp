@@ -13,10 +13,32 @@ import {
   setChatKeysForUser,
   type StoredUser,
 } from "@/lib/secureStorage";
-import { chatAuthApi, ChatAuthApiError } from "@/services/chatAuthApi";
+import { chatAuthApi, ChatAuthApiError, type MeResponse } from "@/services/chatAuthApi";
 import { getMyKeypair } from "@/services/chatKeysApi";
 import { useChatStore } from "@/stores/chatStore";
 import { syncPushWithBackend } from "@/lib/pushNotifications";
+
+/** Свести ответ /auth/me к StoredUser (ФИО, username, аватар data URL). */
+function storedUserFromMe(me: MeResponse, base: StoredUser): StoredUser {
+  const id = String(me.id ?? me.user_id ?? base.id);
+  const parts = [me.last_name, me.first_name, me.middle_name].filter(Boolean) as string[];
+  const nameFromMe = parts.length > 0 ? parts.join(" ").trim() : (me.username?.trim() ?? "");
+  const name = nameFromMe || base.name;
+  const raw = me.avatar;
+  const hasAvatar = raw != null && String(raw).trim() !== "";
+  const out: StoredUser = { id, name };
+  if (hasAvatar) out.avatar = String(raw);
+  return out;
+}
+
+async function fetchStoredUserProfile(accessToken: string, base: StoredUser): Promise<StoredUser> {
+  try {
+    const me = await chatAuthApi.getMe(accessToken);
+    return storedUserFromMe(me, base);
+  } catch {
+    return base;
+  }
+}
 
 export interface RegisterData {
   username: string;
@@ -74,8 +96,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             // Нет ключей на сервере (пользователь без ключевой пары) — не блокируем вход
           }
         }
+        const enriched = await fetchStoredUserProfile(tokens.access_token, user);
+        try {
+          await setAuth(enriched);
+        } catch {
+          // quota / storage — всё равно показываем в сессии
+        }
         set({
-          user,
+          user: enriched,
           isAuthenticated: true,
           isLoading: false,
           error: null,
@@ -97,6 +125,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         id: String(res.user_id),
         name: res.username,
       };
+      const enriched = await fetchStoredUserProfile(res.access_token, user);
       let keys = await getChatKeysForUser(String(res.user_id));
       if (!keys?.private_key) {
         try {
@@ -111,7 +140,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         }
       }
       await setAuthWithTokens(
-        user,
+        enriched,
         {
           access_token: res.access_token,
           refresh_token: res.refresh_token,
@@ -119,7 +148,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         keys ?? undefined
       );
       set({
-        user,
+        user: enriched,
         isAuthenticated: true,
         isLoading: false,
         error: null,

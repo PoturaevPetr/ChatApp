@@ -9,11 +9,18 @@ const MAX_FILE_BASE64_CHARS_IN_STORAGE = 24_000;
 
 function stripFileDataForStorage(content: StoredMessageContent): StoredMessageContent {
   if (content.type !== "file") return content;
-  const { data } = content.file;
-  if (!data || data.length <= MAX_FILE_BASE64_CHARS_IN_STORAGE) return content;
+  const f = { ...content.file } as typeof content.file & { localPreviewUrl?: string };
+  delete f.localPreviewUrl;
+  if (f.file_ref) {
+    return { ...content, file: { ...f, data: "" } };
+  }
+  const { data } = f;
+  if (!data || data.length <= MAX_FILE_BASE64_CHARS_IN_STORAGE) {
+    return { ...content, file: f };
+  }
   return {
     ...content,
-    file: { ...content.file, data: "" },
+    file: { ...f, data: "" },
   };
 }
 
@@ -23,7 +30,11 @@ function stripAllFileBodies(messages: StoredMessage[]): StoredMessage[] {
     ...m,
     content:
       m.content.type === "file"
-        ? { ...m.content, file: { ...m.content.file, data: "" } }
+        ? (() => {
+            const ff = { ...m.content.file } as typeof m.content.file & { localPreviewUrl?: string };
+            delete ff.localPreviewUrl;
+            return { ...m.content, file: { ...ff, data: "" } };
+          })()
         : m.content,
   }));
 }

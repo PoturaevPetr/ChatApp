@@ -1,7 +1,7 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { flushSync } from "react-dom";
+import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal, flushSync } from "react-dom";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
@@ -16,6 +16,9 @@ import {
   ArrowLeft,
   Trash2,
   SwitchCamera,
+  Users,
+  LogOut,
+  Pencil,
 } from "lucide-react";
 import { AuthGuard } from "@/components/AuthGuard";
 import { Layout } from "@/components/Layout";
@@ -24,16 +27,19 @@ import { AttachFileModal } from "@/components/AttachFileModal";
 import { useAuthStore } from "@/stores/authStore";
 import {
   useChatStore,
+  groupSyntheticPeerId,
+  isGroupThreadPeerId,
   type ChatMessage,
-  type ChatMessageFile,
   type ReplyTo,
   type ChatUser,
 } from "@/stores/chatStore";
 import { useWebSocketStore } from "@/stores/websocketStore";
+import { chatWebSocket } from "@/services/chatWebSocket";
 import { getMessagePreviewText, groupMessagesByDate } from "@/utils/chatUtils";
 import { getValidAuthTokens } from "@/lib/validAuthToken";
-import { deleteRoom } from "@/services/chatRoomsApi";
+import { deleteRoom, leaveRoom } from "@/services/chatRoomsApi";
 import { deleteMessage as deleteMessageOnServer } from "@/services/chatMessagesApi";
+import { setMessageReaction } from "@/services/chatReactionsApi";
 import { getUserById } from "@/services/chatUsersApi";
 import { formatPeerPresenceLabel } from "@/lib/formatPeerPresence";
 import { ChatMessageBubble } from "@/components/chat/ChatMessageBubble";
@@ -42,11 +48,14 @@ import { Capacitor, type PluginListenerHandle } from "@capacitor/core";
 import { App, type BackButtonListenerEvent } from "@capacitor/app";
 import { Filesystem, Directory } from "@capacitor/filesystem";
 import { CapacitorAudioEngine } from "capacitor-audio-engine";
-import { dataUrlToBase64Payload } from "@/lib/imageCompress";
+import { base64ToBlob } from "@/lib/imageCompress";
+import {
+  MAX_CHAT_ATTACHMENT_BYTES,
+  alertFileTooLarge,
+  maxAttachmentSizeLabelMb,
+} from "@/lib/chatUploadLimits";
 import { useCaptureModeStore } from "@/stores/captureModeStore";
-
-/** До сжатия на клиенте; тяжёлые фото сжимаются перед REST-загрузкой. */
-const MAX_FILE_SIZE = 25 * 1024 * 1024;
+import { useVisualViewportKeyboardInset } from "@/hooks/useVisualViewportKeyboardInset";
 
 /** Столбцы гистограммы громкости при записи голоса в браузере. */
 const AUDIO_METER_BAR_COUNT = 28;
@@ -87,6 +96,79 @@ const RECORD_HOLD_DELAY_MS = 220;
 const MIN_RECORDED_MEDIA_BYTES = 800;
 /** Максимальная длительность видеосообщения-кружка (запись обрывается автоматически). */
 const MAX_VIDEO_CIRCLE_RECORDING_MS = 40_000;
+
+/** Кружок: умеренное разрешение — меньше цифровой «зум»/кроп на телефонах, меньше файл. */
+const VIDEO_CIRCLE_WIDTH_IDEAL = 480;
+const VIDEO_CIRCLE_WIDTH_MAX = 640;
+const VIDEO_CIRCLE_HEIGHT_IDEAL = 640;
+const VIDEO_CIRCLE_HEIGHT_MAX = 854;
+const VIDEO_CIRCLE_FPS_IDEAL = 24;
+const VIDEO_CIRCLE_FPS_MAX = 28;
+/** Битрейт видео (где MediaRecorder поддерживает). */
+const VIDEO_CIRCLE_RECORDER_VIDEO_BPS = 900_000;
+
+function videoCircleVideoConstraints(
+  facing: "user" | "environment",
+  facingStrict: boolean,
+): MediaTrackConstraints {
+  const base: MediaTrackConstraints = {
+    width: { ideal: VIDEO_CIRCLE_WIDTH_IDEAL, max: VIDEO_CIRCLE_WIDTH_MAX },
+    height: { ideal: VIDEO_CIRCLE_HEIGHT_IDEAL, max: VIDEO_CIRCLE_HEIGHT_MAX },
+    frameRate: { ideal: VIDEO_CIRCLE_FPS_IDEAL, max: VIDEO_CIRCLE_FPS_MAX },
+  };
+  if (facingStrict) {
+    return { ...base, facingMode: { exact: facing } };
+  }
+  return { ...base, facingMode: { ideal: facing } };
+}
+
+async function pickAlternateVideoInputDeviceId(currentId: string | undefined): Promise<string | undefined> {
+  if (!navigator.mediaDevices?.enumerateDevices) return undefined;
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const inputs = devices.filter((d) => d.kind === "videoinput" && d.deviceId);
+  if (inputs.length < 2) return undefined;
+  const other = inputs.find((d) => d.deviceId !== currentId);
+  return other?.deviceId;
+}
+
+/**
+ * Видео только для кружка: сначала strict facing (надёжное переключение), затем ideal, затем другой deviceId.
+ */
+async function getUserMediaVideoCircleTrackOnly(
+  facing: "user" | "environment",
+  currentDeviceId: string | undefined,
+): Promise<MediaStream> {
+  const attempts: MediaStreamConstraints[] = [
+    { video: videoCircleVideoConstraints(facing, true), audio: false },
+    { video: videoCircleVideoConstraints(facing, false), audio: false },
+  ];
+  let lastErr: unknown;
+  for (const constraints of attempts) {
+    try {
+      return await navigator.mediaDevices.getUserMedia(constraints);
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  const altId = await pickAlternateVideoInputDeviceId(currentDeviceId);
+  if (altId) {
+    try {
+      return await navigator.mediaDevices.getUserMedia({
+        video: {
+          deviceId: { exact: altId },
+          width: { ideal: VIDEO_CIRCLE_WIDTH_IDEAL, max: VIDEO_CIRCLE_WIDTH_MAX },
+          height: { ideal: VIDEO_CIRCLE_HEIGHT_IDEAL, max: VIDEO_CIRCLE_HEIGHT_MAX },
+          frameRate: { ideal: VIDEO_CIRCLE_FPS_IDEAL, max: VIDEO_CIRCLE_FPS_MAX },
+        },
+        audio: false,
+      });
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error("getUserMedia video failed");
+}
+
 function pickBrowserRecordingMime(): string {
   if (typeof MediaRecorder === "undefined" || !MediaRecorder.isTypeSupported) {
     return "";
@@ -183,24 +265,33 @@ function fallbackPeerName(userId: string): string {
 
 
 function ChatThreadContent() {
+  const keyboardInset = useVisualViewportKeyboardInset();
   const router = useRouter();
   const searchParams = useSearchParams();
+  const roomIdParam = searchParams.get("roomId")?.trim() ?? null;
   const userId = searchParams.get("userId")?.trim() ?? null;
+  /** Для UI и sendMessage: в группе — synthetic id `g:{roomId}`. */
+  const threadPeerId = roomIdParam ? groupSyntheticPeerId(roomIdParam) : userId;
   const { user } = useAuthStore();
   const {
     activeChatMessages,
     activeChatUser,
     activeRoomId,
     isMessagesLoading,
+    activeChatHasMoreOlder,
+    isLoadingOlderMessages,
     error: messagesError,
     setActiveChat,
     clearActiveChat,
     removeChatByRoomId,
     sendMessage,
     loadChats,
+    chats,
     loadUsers,
     isSending,
     removeMessageFromActiveChat,
+    applyMessageReaction,
+    peerTyping,
   } = useChatStore();
   const isSocketConnected = useWebSocketStore((s) => s.isConnected);
   const ensureConnected = useWebSocketStore((s) => s.ensureConnected);
@@ -221,16 +312,24 @@ function ChatThreadContent() {
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [isDeletingChat, setIsDeletingChat] = useState(false);
+  const [leaveGroupModalOpen, setLeaveGroupModalOpen] = useState(false);
+  const [isLeavingGroup, setIsLeavingGroup] = useState(false);
   const [messageMenu, setMessageMenu] = useState<{ message: ChatMessage; rect: DOMRect } | null>(null);
   const [deleteMessageTarget, setDeleteMessageTarget] = useState<ChatMessage | null>(null);
   const [isDeletingMessage, setIsDeletingMessage] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  /** После подгрузки старых сообщений восстанавливаем позицию скролла (сохраняем «якорь» по высоте). */
+  const pendingOlderScrollRestoreRef = useRef<{ prevScrollHeight: number; prevScrollTop: number } | null>(
+    null,
+  );
   const didInitialScrollRef = useRef(false);
   const mediaAutoscrollUntilRef = useRef(0);
   const userTouchedScrollRef = useRef(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const typingStopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastTypingSentAtRef = useRef(0);
   const emojiKeyboardOpenRef = useRef(false);
   const attachModalOpenRef = useRef(false);
   const headerMenuOpenRef = useRef(false);
@@ -270,10 +369,10 @@ function ChatThreadContent() {
   useEffect(() => {
     sendRecordingCtxRef.current = {
       myId: user?.id ?? "",
-      peerId: userId ?? "",
+      peerId: threadPeerId ?? "",
       reply: replyingTo,
     };
-  }, [user?.id, userId, replyingTo]);
+  }, [user?.id, threadPeerId, replyingTo]);
 
   useEffect(() => {
     const countVideo =
@@ -314,34 +413,35 @@ function ChatThreadContent() {
     const nextFacing = videoFacingModeRef.current === "user" ? "environment" : "user";
     videoCameraFlipLockRef.current = true;
     setVideoCameraFlipping(true);
+    let tmp: MediaStream | null = null;
     try {
-      const tmp = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: { ideal: nextFacing },
-          width: { ideal: 720 },
-          height: { ideal: 1280 },
-        },
-        audio: false,
-      });
+      const currentDeviceId = stream.getVideoTracks()[0]?.getSettings?.()?.deviceId;
+      tmp = await getUserMediaVideoCircleTrackOnly(nextFacing, currentDeviceId);
       const newTrack = tmp.getVideoTracks()[0];
       if (!newTrack) {
         tmp.getTracks().forEach((t) => t.stop());
         throw new Error("no video track");
       }
       if (abandonNativeRecordRef.current) {
-        newTrack.stop();
         tmp.getTracks().forEach((t) => t.stop());
+        tmp = null;
         return;
       }
-      stream.getVideoTracks().forEach((t) => {
+      // Сначала добавляем новый трек, потом гасим старый — иначе MediaRecorder теряет видео.
+      const oldVideo = [...stream.getVideoTracks()];
+      stream.addTrack(newTrack);
+      for (const t of oldVideo) {
         stream.removeTrack(t);
         t.stop();
-      });
-      stream.addTrack(newTrack);
+      }
+      tmp = null;
       videoFacingModeRef.current = nextFacing;
       setVideoFacingMode(nextFacing);
       const el = videoPreviewRef.current;
-      if (el) void el.play().catch(() => {});
+      if (el) {
+        el.srcObject = stream;
+        void el.play().catch(() => {});
+      }
     } catch (e) {
       const isOver =
         e instanceof DOMException &&
@@ -351,6 +451,7 @@ function ChatThreadContent() {
       );
       console.warn("[chat] flip camera:", e);
     } finally {
+      if (tmp) tmp.getTracks().forEach((t) => t.stop());
       videoCameraFlipLockRef.current = false;
       setVideoCameraFlipping(false);
     }
@@ -434,7 +535,7 @@ function ChatThreadContent() {
   }, [isRecording, captureMode]);
 
   useEffect(() => {
-    if (!user || !userId) {
+    if (!user || !threadPeerId) {
       setPeerReady(false);
       return;
     }
@@ -452,7 +553,29 @@ function ChatThreadContent() {
       if (cancelled) return;
 
       const chatsSnap = useChatStore.getState().chats;
-      const uidLower = userId.toLowerCase();
+
+      if (roomIdParam) {
+        const fromList = chatsSnap.find((c) => c.id === roomIdParam);
+        const otherUser: ChatUser = fromList
+          ? {
+              id: fromList.otherUser.id,
+              name: fromList.otherUser.name,
+              avatar: fromList.otherUser.avatar ?? null,
+              lastSeenAt: fromList.otherUser.lastSeenAt ?? null,
+              isOnline: fromList.otherUser.isOnline,
+            }
+          : {
+              id: groupSyntheticPeerId(roomIdParam),
+              name: "Группа",
+              avatar: null,
+            };
+        if (cancelled) return;
+        setActiveChat(user.id, otherUser);
+        setPeerReady(true);
+        return;
+      }
+
+      const uidLower = (userId ?? "").toLowerCase();
       const fromList = chatsSnap.find((c) => String(c.otherUser.id).toLowerCase() === uidLower);
       const fromListUser: ChatUser | null = fromList
         ? {
@@ -466,7 +589,7 @@ function ChatThreadContent() {
 
       let otherUser: ChatUser;
 
-      if (tokens?.access_token) {
+      if (tokens?.access_token && userId) {
         try {
           const u = await getUserById(tokens.access_token, userId);
           if (cancelled) return;
@@ -497,7 +620,7 @@ function ChatThreadContent() {
       } else if (fromListUser) {
         otherUser = fromListUser;
       } else {
-        otherUser = { id: userId, name: fallbackPeerName(userId), avatar: null };
+        otherUser = { id: userId!, name: fallbackPeerName(userId!), avatar: null };
       }
 
       if (cancelled) return;
@@ -510,20 +633,21 @@ function ChatThreadContent() {
       clearActiveChat();
       setPeerReady(false);
     };
-  }, [user?.id, userId, setActiveChat, clearActiveChat, loadUsers, loadChats]);
+  }, [user?.id, userId, roomIdParam, threadPeerId, setActiveChat, clearActiveChat, loadUsers, loadChats]);
 
   useEffect(() => {
-    if (!user?.id || !userId) return;
+    if (!user?.id || !threadPeerId) return;
     void ensureConnected(user.id);
-  }, [user?.id, userId, ensureConnected]);
+  }, [user?.id, threadPeerId, ensureConnected]);
 
   useEffect(() => {
     // New chat opened -> allow initial scroll-to-bottom again.
     didInitialScrollRef.current = false;
     mediaAutoscrollUntilRef.current = 0;
     userTouchedScrollRef.current = false;
+    pendingOlderScrollRestoreRef.current = null;
     setShowScrollToBottom(false);
-  }, [userId]);
+  }, [threadPeerId]);
 
   const updateScrollToBottomVisibility = useCallback(() => {
     const scroller = scrollRef.current;
@@ -532,11 +656,39 @@ function ChatThreadContent() {
     setShowScrollToBottom(distanceFromBottom > 140);
   }, []);
 
+  const handleMessagesScroll = useCallback(() => {
+    const scroller = scrollRef.current;
+    updateScrollToBottomVisibility();
+    if (!scroller || !user?.id) return;
+    if (scroller.scrollTop > 100) return;
+    const st = useChatStore.getState();
+    if (!st.activeChatHasMoreOlder || st.isLoadingOlderMessages || st.isMessagesLoading) return;
+    pendingOlderScrollRestoreRef.current = {
+      prevScrollHeight: scroller.scrollHeight,
+      prevScrollTop: scroller.scrollTop,
+    };
+    void st.loadOlderMessages(user.id);
+  }, [user?.id, updateScrollToBottomVisibility]);
+
+  useLayoutEffect(() => {
+    if (isLoadingOlderMessages) return;
+    const pending = pendingOlderScrollRestoreRef.current;
+    if (!pending) return;
+    pendingOlderScrollRestoreRef.current = null;
+    const el = scrollRef.current;
+    if (!el) return;
+    const delta = el.scrollHeight - pending.prevScrollHeight;
+    if (delta > 0) {
+      el.scrollTop = pending.prevScrollTop + delta;
+    }
+  }, [activeChatMessages, isLoadingOlderMessages]);
+
   useEffect(() => {
     const scroller = scrollRef.current;
     const bottom = bottomRef.current;
     if (!bottom) return;
-    if (isMessagesLoading) return;
+    /** Пока нет ни одного сообщения — ждём; из кэша лента уже есть — скроллим к низу даже при догрузке с API. */
+    if (isMessagesLoading && activeChatMessages.length === 0) return;
 
     if (!didInitialScrollRef.current) {
       // Wait until we actually have messages rendered; otherwise we "lock in" the flag too early.
@@ -581,6 +733,24 @@ function ChatThreadContent() {
   const markUserTouchedScroll = useCallback(() => {
     userTouchedScrollRef.current = true;
     mediaAutoscrollUntilRef.current = 0;
+  }, []);
+
+  /** Android WebView + клавиатура: иногда сдвигается scroll документа — композер «улетает» вверх. */
+  const resetAndroidDocumentScroll = useCallback(() => {
+    if (Capacitor.getPlatform() !== "android") return;
+    const run = () => {
+      try {
+        window.scrollTo(0, 0);
+        document.documentElement.scrollTop = 0;
+        document.body.scrollTop = 0;
+      } catch {
+        /* noop */
+      }
+    };
+    run();
+    requestAnimationFrame(run);
+    window.setTimeout(run, 0);
+    window.setTimeout(run, 80);
   }, []);
 
   useEffect(() => {
@@ -707,12 +877,137 @@ function ChatThreadContent() {
 
   const [presenceClock, bumpPresenceClock] = useState(0);
   useEffect(() => {
-    if (!userId || !peerReady) return;
+    if (!threadPeerId || !peerReady) return;
     const id = window.setInterval(() => bumpPresenceClock((t) => t + 1), 45000);
     return () => window.clearInterval(id);
-  }, [userId, peerReady]);
+  }, [threadPeerId, peerReady]);
 
-  if (!user || !userId) {
+  const isGroupChatEarly = !!(activeChatUser && isGroupThreadPeerId(activeChatUser.id));
+  const activeGroupRow = useMemo(() => {
+    if (!isGroupChatEarly || !activeRoomId) return null;
+    return chats.find((c) => c.id === activeRoomId && c.roomType === "group") ?? null;
+  }, [chats, isGroupChatEarly, activeRoomId]);
+  const isGroupCreator = !!(user?.id && activeGroupRow && String(activeGroupRow.groupCreatedBy) === String(user.id));
+
+  const flushTypingToServer = useCallback(() => {
+    if (typingStopTimerRef.current) {
+      clearTimeout(typingStopTimerRef.current);
+      typingStopTimerRef.current = null;
+    }
+    const rid = activeRoomId;
+    if (rid && chatWebSocket.isConnected()) {
+      chatWebSocket.send({ type: "typing", data: { room_id: rid, is_typing: false } });
+    }
+    lastTypingSentAtRef.current = 0;
+  }, [activeRoomId]);
+
+  const bumpComposerTyping = useCallback(() => {
+    if (!activeRoomId || !chatWebSocket.isConnected()) return;
+    const now = Date.now();
+    if (now - lastTypingSentAtRef.current >= 2500) {
+      lastTypingSentAtRef.current = now;
+      chatWebSocket.send({ type: "typing", data: { room_id: activeRoomId, is_typing: true } });
+    }
+    if (typingStopTimerRef.current) clearTimeout(typingStopTimerRef.current);
+    typingStopTimerRef.current = setTimeout(() => {
+      typingStopTimerRef.current = null;
+      lastTypingSentAtRef.current = 0;
+      if (activeRoomId && chatWebSocket.isConnected()) {
+        chatWebSocket.send({ type: "typing", data: { room_id: activeRoomId, is_typing: false } });
+      }
+    }, 2200);
+  }, [activeRoomId]);
+
+  useEffect(() => {
+    const roomAtMount = activeRoomId;
+    return () => {
+      if (typingStopTimerRef.current) {
+        clearTimeout(typingStopTimerRef.current);
+        typingStopTimerRef.current = null;
+      }
+      if (roomAtMount && chatWebSocket.isConnected()) {
+        chatWebSocket.send({ type: "typing", data: { room_id: roomAtMount, is_typing: false } });
+      }
+    };
+  }, [activeRoomId]);
+
+  const peerIsTyping = useMemo(() => {
+    if (!isSocketConnected || !activeRoomId || !peerTyping) return false;
+    if (peerTyping.roomId !== activeRoomId || peerTyping.until <= Date.now()) return false;
+    const me = user?.id?.trim().toLowerCase() ?? "";
+    if (peerTyping.userId.trim().toLowerCase() === me) return false;
+    if (!isGroupChatEarly) {
+      const peerId = (activeChatUser?.id ?? "").trim().toLowerCase();
+      return peerId.length > 0 && peerTyping.userId.trim().toLowerCase() === peerId;
+    }
+    return true;
+  }, [isSocketConnected, activeRoomId, peerTyping, user?.id, isGroupChatEarly, activeChatUser?.id]);
+
+  const typingPresenceLabel = useMemo(() => {
+    if (!peerIsTyping || !peerTyping) return null;
+    if (!isGroupChatEarly) return "Печатает…";
+    const map = activeGroupRow?.memberShortNameByUserId;
+    const nm = map?.[peerTyping.userId.trim().toLowerCase()];
+    return nm ? `${nm} печатает…` : "Печатает…";
+  }, [peerIsTyping, peerTyping, isGroupChatEarly, activeGroupRow?.memberShortNameByUserId]);
+
+  const resolveReactionAvatar = useCallback(
+    (uid: string) => {
+      const u = uid.trim().toLowerCase();
+      const me = user?.id?.trim().toLowerCase();
+      if (me && u === me) return user?.avatar ?? null;
+      if (activeChatUser?.id && activeChatUser.id.trim().toLowerCase() === u) return activeChatUser.avatar ?? null;
+      const m = activeGroupRow?.groupMembers?.find((x) => String(x.id).toLowerCase() === u);
+      if (m?.avatar) return m.avatar;
+      return null;
+    },
+    [user?.id, user?.avatar, activeChatUser?.id, activeChatUser?.avatar, activeGroupRow],
+  );
+
+  const submitMessageReaction = useCallback(
+    async (messageId: string, emoji: string) => {
+      const rid = activeRoomId;
+      const uid = user?.id;
+      if (!rid || !uid || messageId.startsWith("msg_")) return;
+      try {
+        const tokens = await getValidAuthTokens();
+        if (!tokens?.access_token) {
+          setFileError("Нет авторизации — войдите снова.");
+          return;
+        }
+        const res = await setMessageReaction(tokens.access_token, messageId, emoji);
+        applyMessageReaction({
+          roomId: rid,
+          messageId,
+          userId: uid,
+          emoji: res.emoji,
+          removed: res.removed,
+        });
+      } catch (e) {
+        setFileError(e instanceof Error ? e.message : "Не удалось поставить реакцию");
+      }
+    },
+    [activeRoomId, user?.id, applyMessageReaction],
+  );
+
+  const handleReactionChipFromBubble = useCallback(
+    (messageId: string, emoji: string, chipUserId: string) => {
+      const uid = user?.id;
+      if (!uid || !activeRoomId || messageId.startsWith("msg_")) return;
+      const me = uid.trim().toLowerCase();
+      if (chipUserId.trim().toLowerCase() === me) {
+        void submitMessageReaction(messageId, emoji);
+        return;
+      }
+      const latest = useChatStore.getState().activeChatMessages.find((m) => m.id === messageId);
+      const mine = latest?.reactions?.find((r) => String(r.userId).trim().toLowerCase() === me);
+      if (mine?.emoji === emoji) return;
+      void submitMessageReaction(messageId, emoji);
+    },
+    [activeRoomId, user?.id, submitMessageReaction],
+  );
+
+  if (!user || !threadPeerId) {
     return (
       <AuthGuard requireAuth>
         <Layout>
@@ -743,38 +1038,29 @@ function ChatThreadContent() {
   const handleSend = async () => {
     const text = input.trim();
     if (!text) return;
-    await sendMessage(user.id, userId, text, undefined, replyingTo ?? undefined);
+    flushTypingToServer();
+    setEmojiKeyboardOpen(false);
+    await sendMessage(user.id, threadPeerId, text, undefined, replyingTo ?? undefined);
     setReplyingTo(null);
     setInput("");
   };
 
   const ingestFileForSend = (file: File) => {
     setFileError(null);
-    if (file.size > MAX_FILE_SIZE) {
+    if (file.size > MAX_CHAT_ATTACHMENT_BYTES) {
       clearFileInputs();
-      setFileError(`Файл "${file.name}" не загружен: максимум ${MAX_FILE_SIZE / 1024 / 1024} МБ`);
+      alertFileTooLarge(file.name);
+      setFileError(`Файл «${file.name}» не отправлен: максимум ${maxAttachmentSizeLabelMb()} МБ`);
       return;
     }
-    const reader = new FileReader();
-    reader.onload = async () => {
-      let data: string;
-      try {
-        data = dataUrlToBase64Payload(reader.result as string);
-      } catch {
-        return;
-      }
-      if (!data) return;
-      const filePayload: ChatMessageFile = {
-        name: file.name,
-        mimeType: file.type || "application/octet-stream",
-        data,
-      };
-      await sendMessage(user.id, userId, input.trim(), filePayload, replyingTo ?? undefined);
+    setEmojiKeyboardOpen(false);
+    void (async () => {
+      flushTypingToServer();
+      await sendMessage(user.id, threadPeerId, input.trim(), { nativeFile: file }, replyingTo ?? undefined);
       setReplyingTo(null);
       setInput("");
       clearFileInputs();
-    };
-    reader.readAsDataURL(file);
+    })();
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -869,11 +1155,7 @@ function ChatThreadContent() {
       mode === "video"
         ? {
             audio: true,
-            video: {
-              facingMode: { ideal: videoFacingModeRef.current },
-              width: { ideal: 720 },
-              height: { ideal: 1280 },
-            },
+            video: videoCircleVideoConstraints(videoFacingModeRef.current, false),
           }
         : { audio: true };
 
@@ -922,9 +1204,17 @@ function ChatThreadContent() {
           }
           const videoMime = pickBrowserVideoRecordingMime();
           const selectedMimeType = videoMime;
-          const recorder = selectedMimeType
-            ? new MediaRecorder(stream, { mimeType: selectedMimeType })
-            : new MediaRecorder(stream);
+          let recorder: MediaRecorder;
+          try {
+            recorder = new MediaRecorder(stream, {
+              ...(selectedMimeType ? { mimeType: selectedMimeType } : {}),
+              videoBitsPerSecond: VIDEO_CIRCLE_RECORDER_VIDEO_BPS,
+            });
+          } catch {
+            recorder = selectedMimeType
+              ? new MediaRecorder(stream, { mimeType: selectedMimeType })
+              : new MediaRecorder(stream);
+          }
           mediaRecorderRef.current = recorder;
           chunksRef.current = [];
           recorder.ondataavailable = (e) => {
@@ -943,33 +1233,18 @@ function ChatThreadContent() {
             }
             const ext = fileExtensionForRecordedVideoMime(blobType);
             const name = `video-${Date.now()}.${ext}`;
-            const reader = new FileReader();
-            reader.onloadend = () => {
-              let base64 = "";
-              try {
-                base64 = dataUrlToBase64Payload(reader.result as string);
-              } catch {
-                base64 = "";
-              }
-              const ctx = sendRecordingCtxRef.current;
-              if (base64 && ctx.myId && ctx.peerId) {
-                sendMessage(
-                  ctx.myId,
-                  ctx.peerId,
-                  "",
-                  { name, mimeType: blobType, data: base64 },
-                  ctx.reply ?? undefined,
-                );
-                setReplyingTo(null);
-              }
-              recordHoldDidStartRef.current = false;
-              finalizeRecordingLockRef.current = false;
-            };
-            reader.onerror = () => {
-              recordHoldDidStartRef.current = false;
-              finalizeRecordingLockRef.current = false;
-            };
-            reader.readAsDataURL(blob);
+            const recorded = new File([blob], name, { type: blobType });
+            const ctx = sendRecordingCtxRef.current;
+            if (recorded.size > MAX_CHAT_ATTACHMENT_BYTES) {
+              alertFileTooLarge(name);
+              setFileError(`Запись слишком большая (максимум ${maxAttachmentSizeLabelMb()} МБ).`);
+            } else if (ctx.myId && ctx.peerId) {
+              setEmojiKeyboardOpen(false);
+              void sendMessage(ctx.myId, ctx.peerId, "", { nativeFile: recorded }, ctx.reply ?? undefined);
+              setReplyingTo(null);
+            }
+            recordHoldDidStartRef.current = false;
+            finalizeRecordingLockRef.current = false;
           };
           setVideoRecordPhase("recording");
           recorder.start(200);
@@ -999,33 +1274,18 @@ function ChatThreadContent() {
           }
           const ext = fileExtensionForRecordedAudioMime(blobType);
           const name = `audio-${Date.now()}.${ext}`;
-          const reader = new FileReader();
-          reader.onloadend = () => {
-            let base64 = "";
-            try {
-              base64 = dataUrlToBase64Payload(reader.result as string);
-            } catch {
-              base64 = "";
-            }
-            const ctx = sendRecordingCtxRef.current;
-            if (base64 && ctx.myId && ctx.peerId) {
-              sendMessage(
-                ctx.myId,
-                ctx.peerId,
-                "",
-                { name, mimeType: blobType, data: base64 },
-                ctx.reply ?? undefined,
-              );
-              setReplyingTo(null);
-            }
-            recordHoldDidStartRef.current = false;
-            finalizeRecordingLockRef.current = false;
-          };
-          reader.onerror = () => {
-            recordHoldDidStartRef.current = false;
-            finalizeRecordingLockRef.current = false;
-          };
-          reader.readAsDataURL(blob);
+          const recorded = new File([blob], name, { type: blobType });
+          const ctx = sendRecordingCtxRef.current;
+          if (recorded.size > MAX_CHAT_ATTACHMENT_BYTES) {
+            alertFileTooLarge(name);
+            setFileError(`Запись слишком большая (максимум ${maxAttachmentSizeLabelMb()} МБ).`);
+          } else if (ctx.myId && ctx.peerId) {
+            setEmojiKeyboardOpen(false);
+            void sendMessage(ctx.myId, ctx.peerId, "", { nativeFile: recorded }, ctx.reply ?? undefined);
+            setReplyingTo(null);
+          }
+          recordHoldDidStartRef.current = false;
+          finalizeRecordingLockRef.current = false;
         };
         recorder.start(200);
         setIsRecording(true);
@@ -1084,18 +1344,17 @@ function ChatThreadContent() {
         const base64Str = typeof base64 === "string" ? base64 : "";
         const ctx = sendRecordingCtxRef.current;
         if (base64Str && ctx.myId && ctx.peerId) {
-          sendMessage(
-            ctx.myId,
-            ctx.peerId,
-            "",
-            {
-              name: info.filename || fileName,
-              mimeType: info.mimeType || "audio/mp4",
-              data: base64Str,
-            },
-            ctx.reply ?? undefined,
-          );
-          setReplyingTo(null);
+          const mime = info.mimeType || "audio/mp4";
+          const blob = base64ToBlob(base64Str, mime);
+          const recorded = new File([blob], info.filename || fileName, { type: mime });
+          if (recorded.size > MAX_CHAT_ATTACHMENT_BYTES) {
+            alertFileTooLarge(recorded.name);
+            setFileError(`Запись слишком большая (максимум ${maxAttachmentSizeLabelMb()} МБ).`);
+          } else {
+            setEmojiKeyboardOpen(false);
+            void sendMessage(ctx.myId, ctx.peerId, "", { nativeFile: recorded }, ctx.reply ?? undefined);
+            setReplyingTo(null);
+          }
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -1131,7 +1390,7 @@ function ChatThreadContent() {
   stopRecordingRef.current = stopRecording;
 
   const onRecordPointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
-    if (e.button !== 0 || isSending || !user?.id || !userId) return;
+    if (e.button !== 0 || isSending || !user?.id || !threadPeerId) return;
     if (isRecording || videoRecordPhase !== null) return;
     e.preventDefault();
     try {
@@ -1169,15 +1428,19 @@ function ChatThreadContent() {
 
   const displayName = activeChatUser?.name ?? "Пользователь";
   void presenceClock;
-  const presenceLabel = formatPeerPresenceLabel({
-    isOnline: activeChatUser?.isOnline,
-    lastSeenAt: activeChatUser?.lastSeenAt ?? null,
-  });
+  const isGroupChat = isGroupChatEarly;
+  const presenceLabel = isGroupChat
+    ? "Групповой чат"
+    : formatPeerPresenceLabel({
+        isOnline: activeChatUser?.isOnline,
+        lastSeenAt: activeChatUser?.lastSeenAt ?? null,
+      });
   const groups = groupMessagesByDate(activeChatMessages);
   const hasMessages = activeChatMessages.length > 0;
 
   const handleDeleteChat = async () => {
     if (!activeRoomId) return;
+    if (isGroupChat && !isGroupCreator) return;
     if (isDeletingChat) return;
     setIsDeletingChat(true);
     try {
@@ -1197,75 +1460,40 @@ function ChatThreadContent() {
 
   const openPeerProfile = () => {
     const peerId = activeChatUser?.id || userId;
-    if (!peerId) return;
+    if (!peerId || isGroupThreadPeerId(peerId)) return;
     router.push(`/users/user?user_id=${encodeURIComponent(peerId)}`);
+  };
+
+  const onHeaderPeerClick = () => {
+    if (isGroupChat && activeRoomId) {
+      router.push(`/chat/group?roomId=${encodeURIComponent(activeRoomId)}`);
+      return;
+    }
+    openPeerProfile();
+  };
+
+  const handleLeaveGroup = async () => {
+    if (!activeRoomId || isLeavingGroup) return;
+    setIsLeavingGroup(true);
+    try {
+      const tokens = await getValidAuthTokens();
+      if (!tokens?.access_token) return;
+      await leaveRoom(tokens.access_token, activeRoomId);
+      removeChatByRoomId(activeRoomId);
+      clearActiveChat();
+      setLeaveGroupModalOpen(false);
+      router.replace("/");
+    } catch (e) {
+      console.warn("leaveRoom failed:", e);
+    } finally {
+      setIsLeavingGroup(false);
+    }
   };
 
   return (
     <AuthGuard requireAuth>
       <Layout>
         <div className="flex h-full min-h-0 flex-col overflow-hidden relative">
-          {videoRecordPhase !== null ? (
-            <div className="fixed inset-0 z-[70] flex flex-col items-center justify-center gap-3 p-4 pointer-events-none">
-              <div className="pointer-events-none absolute inset-0 bg-black/45 backdrop-blur-xl backdrop-saturate-150" />
-              {/* Кнопка смены камеры НЕ внутри overflow-hidden — иначе обрезается у круга. */}
-              <div className="relative z-10 aspect-square h-[min(90vw,82dvh)] w-[min(90vw,82dvh)] shrink-0">
-                <div className="absolute inset-0 overflow-hidden rounded-full border-[3px] border-primary shadow-lg shadow-primary/25">
-                  <video
-                    ref={videoPreviewRef}
-                    className={`pointer-events-none h-full w-full object-cover ${
-                      videoFacingMode === "user" ? "[transform:scaleX(-1)]" : ""
-                    }`}
-                    playsInline
-                    muted
-                  />
-                </div>
-                <button
-                  type="button"
-                  onClick={() => void flipVideoCamera()}
-                  disabled={videoCameraFlipping}
-                  className="pointer-events-auto absolute bottom-2 left-1/2 z-20 flex h-12 w-12 -translate-x-1/2 items-center justify-center rounded-full border-2 border-primary/80 bg-background/95 text-primary shadow-lg backdrop-blur-md transition hover:bg-background active:scale-95 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/70 dark:bg-background/90 dark:text-primary"
-                  aria-label={
-                    videoFacingMode === "user"
-                      ? "Переключить на основную камеру"
-                      : "Переключить на фронтальную камеру"
-                  }
-                  title="Сменить камеру (можно вторым пальцем, не отпуская запись)"
-                >
-                  {videoCameraFlipping ? (
-                    <Loader2 className="h-6 w-6 animate-spin" aria-hidden />
-                  ) : (
-                    <SwitchCamera className="h-6 w-6" aria-hidden />
-                  )}
-                </button>
-              </div>
-              <div className="relative z-10 flex flex-col items-center gap-2.5">
-                <p
-                  className="pointer-events-none text-sm font-semibold tabular-nums text-white/95 drop-shadow-md"
-                  aria-live="polite"
-                >
-                  {videoRecordPhase === "recording"
-                    ? `${formatRecordingDuration(Math.min(recordingDurationMs, MAX_VIDEO_CIRCLE_RECORDING_MS))} / ${formatRecordingDuration(MAX_VIDEO_CIRCLE_RECORDING_MS)}`
-                    : "Камера…"}
-                </p>
-                <p className="pointer-events-none max-w-[min(90vw,20rem)] text-center text-xs text-white/75 drop-shadow">
-                  Отпустите палец — запись продолжается. Нажмите «Отправить», чтобы завершить. Максимум{" "}
-                  {formatRecordingDuration(MAX_VIDEO_CIRCLE_RECORDING_MS)} — дальше запись остановится сама.
-                </p>
-                <button
-                  type="button"
-                  onClick={() => void stopRecording()}
-                  disabled={isSending}
-                  className="pointer-events-auto flex items-center gap-2 rounded-full bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground shadow-lg transition hover:bg-primary/90 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
-                  aria-label="Отправить видеосообщение"
-                >
-                  <Send className="h-4 w-4 shrink-0" aria-hidden />
-                  Отправить
-                </button>
-              </div>
-            </div>
-          ) : null}
-
           <header className="absolute w-full top-0 z-30 border-b border-white/10 bg-background/35 backdrop-blur-xl shadow-[0_10px_30px_-20px_rgba(0,0,0,0.6)] overflow-visible">
             <div className="absolute inset-0 overflow-hidden">
               <div className="pointer-events-none absolute inset-0">
@@ -1289,10 +1517,10 @@ function ChatThreadContent() {
 
               <button
                 type="button"
-                onClick={openPeerProfile}
+                onClick={onHeaderPeerClick}
                 className="relative shrink-0 rounded-full focus:outline-none focus:ring-2 focus:ring-primary/35"
-                aria-label="Открыть профиль собеседника"
-                title="Профиль"
+                aria-label={isGroupChat ? "Профиль группы" : "Открыть профиль собеседника"}
+                title={isGroupChat ? "Профиль группы" : "Профиль"}
               >
                 <div className="absolute -inset-0.5 rounded-full bg-gradient-to-br from-primary/45 via-primary/15 to-transparent blur-md" />
                 <div className="relative h-10 w-10 overflow-hidden rounded-full border border-white/20 bg-white/10 shadow-sm">
@@ -1315,9 +1543,9 @@ function ChatThreadContent() {
                 <div className="flex items-center gap-2 min-w-0">
                   <button
                     type="button"
-                    onClick={openPeerProfile}
+                    onClick={onHeaderPeerClick}
                     className="font-semibold text-foreground truncate hover:underline focus:outline-none focus:ring-2 focus:ring-primary/30 rounded"
-                    title="Открыть профиль собеседника"
+                    title={isGroupChat ? "Профиль группы" : "Открыть профиль собеседника"}
                   >
                     {displayName}
                   </button>
@@ -1326,9 +1554,11 @@ function ChatThreadContent() {
                   className={`mt-0.5 truncate text-xs ${
                     !isSocketConnected
                       ? "text-muted-foreground"
-                      : activeChatUser?.isOnline
-                        ? "font-medium text-emerald-500"
-                        : "text-muted-foreground"
+                      : peerIsTyping
+                        ? "text-muted-foreground"
+                        : activeChatUser?.isOnline
+                          ? "font-medium text-primary"
+                          : "text-muted-foreground"
                   }`}
                   aria-live={!isSocketConnected ? "polite" : undefined}
                   aria-busy={!isSocketConnected ? true : undefined}
@@ -1337,6 +1567,11 @@ function ChatThreadContent() {
                     <span className="inline-flex items-center gap-2">
                       <span>Соединение</span>
                       <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-primary" aria-hidden />
+                    </span>
+                  ) : peerIsTyping && typingPresenceLabel ? (
+                    <span className="inline-flex items-center gap-1.5">
+                      <Pencil className="h-3.5 w-3.5 shrink-0" aria-hidden strokeWidth={2.4} />
+                      <span>{typingPresenceLabel}</span>
                     </span>
                   ) : (
                     presenceLabel
@@ -1360,20 +1595,65 @@ function ChatThreadContent() {
                 {headerMenuOpen ? (
                   <div
                     role="menu"
-                    className="absolute right-0 mt-2 w-44 overflow-hidden rounded-xl border border-white/15 bg-background/70 backdrop-blur-xl shadow-xl"
+                    className="absolute right-0 mt-2 min-w-[12rem] overflow-hidden rounded-xl border border-white/15 bg-background/70 backdrop-blur-xl shadow-xl"
                   >
-                    <button
-                      type="button"
-                      role="menuitem"
-                      onClick={() => {
-                        setHeaderMenuOpen(false);
-                        setDeleteModalOpen(true);
-                      }}
-                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-destructive hover:bg-white/10 focus:outline-none focus:bg-white/10"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                      Удалить чат
-                    </button>
+                    {isGroupChat ? (
+                      <>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          onClick={() => {
+                            setHeaderMenuOpen(false);
+                            if (activeRoomId) {
+                              router.push(`/chat/group?roomId=${encodeURIComponent(activeRoomId)}`);
+                            }
+                          }}
+                          className="flex w-full items-center gap-2 px-3 py-2 text-sm text-foreground hover:bg-white/10 focus:outline-none focus:bg-white/10"
+                        >
+                          <Users className="h-4 w-4" />
+                          Профиль группы
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          onClick={() => {
+                            setHeaderMenuOpen(false);
+                            setLeaveGroupModalOpen(true);
+                          }}
+                          className="flex w-full items-center gap-2 px-3 py-2 text-sm text-foreground hover:bg-white/10 focus:outline-none focus:bg-white/10"
+                        >
+                          <LogOut className="h-4 w-4" />
+                          Покинуть группу
+                        </button>
+                        {isGroupCreator ? (
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => {
+                              setHeaderMenuOpen(false);
+                              setDeleteModalOpen(true);
+                            }}
+                            className="flex w-full items-center gap-2 px-3 py-2 text-sm text-destructive hover:bg-white/10 focus:outline-none focus:bg-white/10"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                            Удалить для всех
+                          </button>
+                        ) : null}
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setHeaderMenuOpen(false);
+                          setDeleteModalOpen(true);
+                        }}
+                        className="flex w-full items-center gap-2 px-3 py-2 text-sm text-destructive hover:bg-white/10 focus:outline-none focus:bg-white/10"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                        Удалить чат
+                      </button>
+                    )}
                   </div>
                 ) : null}
               </div>
@@ -1393,9 +1673,13 @@ function ChatThreadContent() {
                 className="relative w-full max-w-sm rounded-2xl border border-white/15 bg-background/70 backdrop-blur-xl shadow-xl p-4"
                 onClick={(e) => e.stopPropagation()}
               >
-                <p className="text-sm font-semibold text-foreground">Удалить чат?</p>
+                <p className="text-sm font-semibold text-foreground">
+                  {isGroupChat ? "Удалить группу для всех?" : "Удалить чат?"}
+                </p>
                 <p className="mt-2 text-xs text-muted-foreground">
-                  Данные чата будут удалены для обоих участников.
+                  {isGroupChat
+                    ? "Сообщения и участники будут удалены. Это действие необратимо."
+                    : "Данные чата будут удалены для обоих участников."}
                 </p>
 
                 <div className="mt-4 flex items-center justify-end gap-2">
@@ -1421,6 +1705,45 @@ function ChatThreadContent() {
             </div>
           ) : null}
 
+          {leaveGroupModalOpen ? (
+            <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+              <div
+                className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+                onClick={() => !isLeavingGroup && setLeaveGroupModalOpen(false)}
+              />
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-label="Покинуть группу"
+                className="relative w-full max-w-sm rounded-2xl border border-white/15 bg-background/70 backdrop-blur-xl shadow-xl p-4"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <p className="text-sm font-semibold text-foreground">Покинуть группу?</p>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Вы перестанете видеть чат в списке. Остальные участники сохранят переписку.
+                </p>
+                <div className="mt-4 flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setLeaveGroupModalOpen(false)}
+                    disabled={isLeavingGroup}
+                    className="rounded-xl px-3 py-2 text-sm text-muted-foreground hover:bg-white/10 hover:text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 disabled:opacity-50"
+                  >
+                    Отмена
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleLeaveGroup()}
+                    disabled={isLeavingGroup}
+                    className="rounded-xl bg-destructive px-3 py-2 text-sm text-destructive-foreground disabled:opacity-60"
+                  >
+                    {isLeavingGroup ? "Выход…" : "Покинуть"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : null}
+
           {messageMenu ? (
             <MessageActionsOverlay
               message={messageMenu.message}
@@ -1437,6 +1760,12 @@ function ChatThreadContent() {
                 setMessageMenu(null);
               }}
               canDelete={messageMenu.message.isOwn && !messageMenu.message.isUploading}
+              roomId={activeRoomId}
+              canReact={Boolean(activeRoomId) && !messageMenu.message.id.startsWith("msg_")}
+              onPickReaction={(emoji) => {
+                const msg = messageMenu.message;
+                void submitMessageReaction(msg.id, emoji);
+              }}
             />
           ) : null}
 
@@ -1506,7 +1835,7 @@ function ChatThreadContent() {
 
             <div
               ref={scrollRef}
-              onScroll={updateScrollToBottomVisibility}
+              onScroll={handleMessagesScroll}
               onWheel={markUserTouchedScroll}
               onTouchStart={markUserTouchedScroll}
               onPointerDown={markUserTouchedScroll}
@@ -1514,14 +1843,15 @@ function ChatThreadContent() {
                 if (emojiKeyboardOpen) setEmojiKeyboardOpen(false);
                 if (messageMenu) setMessageMenu(null);
               }}
-              className={`no-scrollbar relative z-10 h-full overflow-y-auto overscroll-contain px-4 pt-20 ${
-                emojiKeyboardOpen
-                  ? "pb-[calc(5rem+min(40dvh,280px)+env(safe-area-inset-bottom,0px))]"
-                  : "pb-[calc(5rem+env(safe-area-inset-bottom,0px))]"
-              }`}
+              className="no-scrollbar relative z-10 h-full overflow-y-auto overscroll-contain px-5 pt-20 sm:px-7"
+              style={{
+                paddingBottom: emojiKeyboardOpen
+                  ? `calc(5rem + min(40dvh, 320px) + env(safe-area-inset-bottom, 0px) + ${keyboardInset}px)`
+                  : `calc(5rem + env(safe-area-inset-bottom, 0px) + ${keyboardInset}px)`,
+              }}
             >
               <div className="min-h-full flex flex-col justify-end space-y-4">
-                {isMessagesLoading && (
+                {isMessagesLoading && !hasMessages && (
                   <div className="flex justify-center py-8 text-muted-foreground">
                     <Loader2 className="w-8 h-8 animate-spin" />
                   </div>
@@ -1541,8 +1871,19 @@ function ChatThreadContent() {
                 {!isMessagesLoading && !messagesError && !hasMessages && (
                   <p className="text-center text-sm text-muted-foreground py-8">Нет сообщений</p>
                 )}
-                {!isMessagesLoading && !messagesError && hasMessages && (
+                {!messagesError && hasMessages && (
                   <>
+                    {isMessagesLoading && (
+                      <div className="flex justify-center items-center gap-2 py-2 text-muted-foreground text-xs">
+                        <Loader2 className="w-4 h-4 shrink-0 animate-spin" aria-hidden />
+                        <span>Обновление…</span>
+                      </div>
+                    )}
+                    {isLoadingOlderMessages && (
+                      <div className="flex justify-center py-3 text-muted-foreground">
+                        <Loader2 className="w-5 h-5 animate-spin" aria-label="Загрузка сообщений" />
+                      </div>
+                    )}
                     {groups.length > 0 ? (
                       groups.map(({ date, messages }) => (
                         <div key={date}>
@@ -1560,6 +1901,14 @@ function ChatThreadContent() {
                                 dimmed={messageMenu !== null && messageMenu.message.id !== msg.id}
                                 hideVisual={messageMenu !== null && messageMenu.message.id === msg.id}
                                 onLongPress={(rect) => setMessageMenu({ message: msg, rect })}
+                                resolveReactionAvatar={resolveReactionAvatar}
+                                currentUserId={user.id}
+                                groupIncomingAvatar={isGroupChatEarly}
+                                onReactionChipClick={
+                                  activeRoomId
+                                    ? (emoji, chipUserId) => handleReactionChipFromBubble(msg.id, emoji, chipUserId)
+                                    : undefined
+                                }
                               />
                             ))}
                           </div>
@@ -1575,13 +1924,21 @@ function ChatThreadContent() {
                             dimmed={messageMenu !== null && messageMenu.message.id !== msg.id}
                             hideVisual={messageMenu !== null && messageMenu.message.id === msg.id}
                             onLongPress={(rect) => setMessageMenu({ message: msg, rect })}
+                            resolveReactionAvatar={resolveReactionAvatar}
+                            currentUserId={user.id}
+                            groupIncomingAvatar={isGroupChatEarly}
+                            onReactionChipClick={
+                              activeRoomId
+                                ? (emoji, chipUserId) => handleReactionChipFromBubble(msg.id, emoji, chipUserId)
+                                : undefined
+                            }
                           />
                         ))}
                       </div>
                     )}
                   </>
                 )}
-                {!isMessagesLoading && <div ref={bottomRef} />}
+                <div ref={bottomRef} />
               </div>
             </div>
           </div>
@@ -1590,11 +1947,12 @@ function ChatThreadContent() {
             <button
               type="button"
               onClick={() => bottomRef.current?.scrollIntoView({ behavior: "smooth" })}
-              className={`absolute border right-4 z-40 flex h-11 w-11 items-center text-primary justify-center rounded-full border border-primary/50 bg-background/50 backdrop-blur-xl shadow-lg hover:bg-background/60 focus:outline-none focus:ring-2 focus:ring-primary/40 ${
-                emojiKeyboardOpen
-                  ? "bottom-[calc(6rem+min(40dvh,280px)+env(safe-area-inset-bottom,0px))]"
-                  : "bottom-[calc(6rem+env(safe-area-inset-bottom,0px))]"
-              }`}
+              className="fixed right-4 z-40 flex h-11 w-11 items-center justify-center rounded-full border border-primary/50 bg-background/50 text-primary shadow-lg backdrop-blur-xl hover:bg-background/60 focus:outline-none focus:ring-2 focus:ring-primary/40"
+              style={{
+                bottom: emojiKeyboardOpen
+                  ? `calc(6rem + min(40dvh, 320px) + env(safe-area-inset-bottom, 0px) + ${keyboardInset}px)`
+                  : `calc(6rem + env(safe-area-inset-bottom, 0px) + ${keyboardInset}px)`,
+              }}
               aria-label="Вниз"
               title="Вниз"
             >
@@ -1602,12 +1960,10 @@ function ChatThreadContent() {
             </button>
           ) : null}
 
-          <div className="absolute w-full bottom-0 z-30 border-t border-white/10 bg-background/60 backdrop-blur-xl pb-[env(safe-area-inset-bottom,0px)]">
-            <EmojiKeyboardPanel
-              open={emojiKeyboardOpen}
-              onClose={() => setEmojiKeyboardOpen(false)}
-              onSelect={(emoji) => setInput((prev) => prev + emoji)}
-            />
+          <div
+            className="fixed inset-x-0 z-30 border-t border-white/10 bg-background/60 backdrop-blur-xl pb-[env(safe-area-inset-bottom,0px)]"
+            style={{ bottom: keyboardInset }}
+          >
             <div className="px-4 pb-3 pt-2">
               {fileError && (
                 <div className="mb-2 rounded-xl border border-destructive/20 bg-destructive/10 px-3 py-2">
@@ -1732,10 +2088,22 @@ function ChatThreadContent() {
                       ref={inputRef}
                       type="text"
                       value={input}
-                      onChange={(e) => setInput(e.target.value)}
-                      onFocus={() => setEmojiKeyboardOpen(false)}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setInput(v);
+                        if (v.trim()) bumpComposerTyping();
+                        else flushTypingToServer();
+                      }}
+                      onBlur={() => flushTypingToServer()}
+                      onFocus={() => {
+                        setEmojiKeyboardOpen(false);
+                        resetAndroidDocumentScroll();
+                      }}
                       placeholder="Сообщение..."
                       className="min-w-0 flex-1 border-0 bg-transparent py-2 pl-2 pr-2 text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-0"
+                      enterKeyHint="send"
+                      autoComplete="off"
+                      autoCorrect="on"
                     />
                     {input.trim() ? (
                       <button
@@ -1753,6 +2121,15 @@ function ChatThreadContent() {
                         onPointerDown={isRecording ? undefined : onRecordPointerDown}
                         onPointerUp={onRecordPointerUp}
                         onPointerCancel={onRecordPointerUp}
+                        style={
+                          isRecording && captureMode === "audio"
+                            ? {
+                                transform: "scale(1.08)",
+                                transformOrigin: "center center",
+                                transition: "transform 200ms ease-out",
+                              }
+                            : undefined
+                        }
                         className={`flex h-10 shrink-0 touch-manipulation items-center justify-center rounded-full focus:outline-none focus:ring-2 focus:ring-primary/50 focus:ring-offset-2 focus:ring-offset-background disabled:opacity-50 ${
                           isRecording
                             ? "min-w-[4.25rem] gap-1.5 border-2 border-destructive bg-background px-2.5 text-destructive dark:bg-background/80"
@@ -1801,9 +2178,88 @@ function ChatThreadContent() {
                 </form>
               </div>
             </div>
+            <EmojiKeyboardPanel
+              open={emojiKeyboardOpen}
+              onClose={() => setEmojiKeyboardOpen(false)}
+              onSelect={(emoji) => {
+                setInput((prev) => {
+                  const next = prev + emoji;
+                  if (next.trim()) queueMicrotask(() => bumpComposerTyping());
+                  return next;
+                });
+              }}
+            />
           </div>
         </div>
       </Layout>
+      {videoRecordPhase !== null
+        ? createPortal(
+            <div className="pointer-events-none fixed inset-0 z-[10070] flex flex-col items-center justify-center gap-3 p-4">
+              <div className="pointer-events-none absolute inset-0 bg-black/45 backdrop-blur-xl backdrop-saturate-150" />
+              <div
+                className={`relative z-10 m-3 aspect-square shrink-0 origin-center transition-[width,height] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] will-change-[width,height] ${
+                  videoRecordPhase === "recording"
+                    ? "h-[min(70vmin,92vw,88dvh)] w-[min(70vmin,92vw,88dvh)]"
+                    : "h-[min(52vmin,88vw,78dvh)] w-[min(52vmin,88vw,78dvh)]"
+                }`}
+              >
+                <div className="absolute inset-0 overflow-hidden rounded-full border-[3px] border-primary shadow-lg shadow-primary/25">
+                  <video
+                    ref={videoPreviewRef}
+                    className={`pointer-events-none h-full w-full object-cover ${
+                      videoFacingMode === "user" ? "[transform:scaleX(-1)]" : ""
+                    }`}
+                    playsInline
+                    muted
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void flipVideoCamera()}
+                  disabled={videoCameraFlipping}
+                  className="pointer-events-auto absolute bottom-2 left-1/2 z-20 flex h-12 w-12 -translate-x-1/2 items-center justify-center rounded-full border-2 border-primary/80 bg-background/95 text-primary shadow-lg backdrop-blur-md transition hover:bg-background active:scale-95 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/70 dark:bg-background/90 dark:text-primary"
+                  aria-label={
+                    videoFacingMode === "user"
+                      ? "Переключить на основную камеру"
+                      : "Переключить на фронтальную камеру"
+                  }
+                  title="Сменить камеру (можно вторым пальцем, не отпуская запись)"
+                >
+                  {videoCameraFlipping ? (
+                    <Loader2 className="h-6 w-6 animate-spin" aria-hidden />
+                  ) : (
+                    <SwitchCamera className="h-6 w-6" aria-hidden />
+                  )}
+                </button>
+              </div>
+              <div className="relative z-10 flex flex-col items-center gap-2.5">
+                <p
+                  className="pointer-events-none text-sm font-semibold tabular-nums text-white/95 drop-shadow-md"
+                  aria-live="polite"
+                >
+                  {videoRecordPhase === "recording"
+                    ? `${formatRecordingDuration(Math.min(recordingDurationMs, MAX_VIDEO_CIRCLE_RECORDING_MS))} / ${formatRecordingDuration(MAX_VIDEO_CIRCLE_RECORDING_MS)}`
+                    : "Камера…"}
+                </p>
+                <p className="pointer-events-none max-w-[min(90vw,20rem)] text-center text-xs text-white/75 drop-shadow">
+                  Отпустите палец — запись продолжается. Нажмите «Отправить», чтобы завершить. Максимум{" "}
+                  {formatRecordingDuration(MAX_VIDEO_CIRCLE_RECORDING_MS)} — дальше запись остановится сама.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => void stopRecording()}
+                  disabled={isSending}
+                  className="pointer-events-auto flex items-center gap-2 rounded-full bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground shadow-lg transition hover:bg-primary/90 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
+                  aria-label="Отправить видеосообщение"
+                >
+                  <Send className="h-4 w-4 shrink-0" aria-hidden />
+                  Отправить
+                </button>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
     </AuthGuard>
   );
 }

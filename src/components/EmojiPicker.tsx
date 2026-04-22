@@ -1,20 +1,29 @@
 "use client";
 
-import { useCallback, useRef } from "react";
-import { Smile, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { Loader2, Smile, X } from "lucide-react";
+import Picker from "@emoji-mart/react";
+import type { EmojiMartData } from "@emoji-mart/data";
 
-export const EMOJI_LIST = [
-  "😀", "😃", "😄", "😁", "😅", "😂", "🤣", "😊", "😇", "🙂",
-  "😉", "😌", "😍", "🥰", "😘", "😗", "😙", "😚", "😋", "😛",
-  "😜", "🤪", "😝", "🤑", "🤗", "🤭", "🤫", "🤔", "🤐", "🤨",
-  "😐", "😑", "😶", "😏", "😒", "🙄", "😬", "🤥", "😌", "😔",
-  "👍", "👎", "👌", "✌️", "🤞", "🤟", "🤘", "🤙", "👈", "👉",
-  "👆", "👇", "☝️", "✋", "🤚", "🖐️", "🖖", "👋", "🤙", "💪",
-  "❤️", "🧡", "💛", "💚", "💙", "💜", "🖤", "🤍", "🤎", "💔",
-  "❣️", "💕", "💞", "💓", "💗", "💖", "💘", "💝", "💟", "✨",
-  "🔥", "⭐", "🌟", "💫", "✅", "❌", "❗", "❓", "‼️", "💬",
-  "🎉", "🎊", "🎈", "🎁", "🏆", "👍", "👏", "🙌", "🤝", "💯",
-];
+function subscribeDarkMode(onChange: () => void) {
+  const el = document.documentElement;
+  const obs = new MutationObserver(onChange);
+  obs.observe(el, { attributes: true, attributeFilter: ["class"] });
+  return () => obs.disconnect();
+}
+
+function getDarkModeSnapshot() {
+  return document.documentElement.classList.contains("dark");
+}
+
+function getDarkModeServerSnapshot() {
+  return false;
+}
+
+type PickerPayload = {
+  data: EmojiMartData;
+  i18n: Record<string, unknown>;
+};
 
 interface EmojiKeyboardTriggerProps {
   open: boolean;
@@ -47,11 +56,51 @@ interface EmojiKeyboardPanelProps {
   onSelect: (emoji: string) => void;
 }
 
+type EmojiSelectPayload = {
+  native?: string;
+  skins?: { native?: string }[];
+};
+
+function nativeFromEmojiMart(emoji: EmojiSelectPayload): string {
+  const fromSkin = emoji.skins?.[0]?.native;
+  if (typeof fromSkin === "string" && fromSkin) return fromSkin;
+  if (typeof emoji.native === "string" && emoji.native) return emoji.native;
+  return "";
+}
+
 /**
- * Полноширинная панель снизу (над строкой ввода), в духе экранной клавиатуры.
+ * Полноширинная панель под строкой ввода чата (в духе экранной клавиатуры).
+ * Набор эмодзи — [Emoji Mart](https://github.com/missive/emoji-mart) (@emoji-mart/data + @emoji-mart/react).
  */
 export function EmojiKeyboardPanel({ open, onClose, onSelect }: EmojiKeyboardPanelProps) {
   const touchStartY = useRef<number | null>(null);
+  const [payload, setPayload] = useState<PickerPayload | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  const isDark = useSyncExternalStore(subscribeDarkMode, getDarkModeSnapshot, getDarkModeServerSnapshot);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setLoadError(null);
+    void Promise.all([
+      import("@emoji-mart/data"),
+      import("@emoji-mart/data/i18n/ru.json"),
+    ])
+      .then(([dataMod, i18nMod]) => {
+        if (cancelled) return;
+        setPayload({
+          data: dataMod.default as EmojiMartData,
+          i18n: i18nMod.default as Record<string, unknown>,
+        });
+      })
+      .catch(() => {
+        if (!cancelled) setLoadError("Не удалось загрузить набор эмодзи");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
 
   const onHandleTouchStart = useCallback((e: React.TouchEvent) => {
     touchStartY.current = e.touches[0]?.clientY ?? null;
@@ -72,43 +121,42 @@ export function EmojiKeyboardPanel({ open, onClose, onSelect }: EmojiKeyboardPan
 
   return (
     <div
-      className="w-full border-t border-white/10 bg-background/95 backdrop-blur-xl shadow-[0_-8px_24px_rgba(0,0,0,0.12)] flex flex-col max-h-[min(40dvh,280px)] min-h-[160px]"
+      className="flex max-h-[min(40dvh,320px)] min-h-[160px] w-full flex-col border-t border-white/10 bg-background/95 shadow-[0_8px_24px_rgba(0,0,0,0.1)] backdrop-blur-xl"
       role="dialog"
       aria-label="Выбор эмодзи"
     >
-      <div
-        className="relative flex min-h-[52px] shrink-0 items-center justify-center border-b border-border/60 px-3 py-2"
-        onTouchStart={onHandleTouchStart}
-        onTouchEnd={onHandleTouchEnd}
-      >
-        <div className="pointer-events-none absolute left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-1">
-          <div className="h-1 w-10 rounded-full bg-muted-foreground/35" aria-hidden />
-          <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Смайлы</span>
-        </div>
-        <button
-          type="button"
-          onClick={onClose}
-          className="absolute right-2 top-1/2 z-[1] -translate-y-1/2 rounded-full p-2 text-muted-foreground hover:bg-muted/60 hover:text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
-          aria-label="Закрыть"
-        >
-          <X className="h-5 w-5" />
-        </button>
-      </div>
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-2 pt-1">
-        <div className="grid grid-cols-8 gap-0.5 sm:grid-cols-10">
-          {EMOJI_LIST.map((emoji, idx) => (
-            <button
-              key={`${idx}-${emoji}`}
-              type="button"
-              className="flex h-10 items-center justify-center rounded-lg text-xl hover:bg-muted/70 active:bg-muted focus:outline-none focus:ring-2 focus:ring-primary/25"
-              onClick={() => {
-                onSelect(emoji);
+      <div className="flex min-h-0 w-full flex-1 flex-col overflow-hidden px-1 pb-1 pt-0">
+        {loadError ? (
+          <p className="px-2 py-6 text-center text-xs text-muted-foreground">{loadError}</p>
+        ) : !payload ? (
+          <div className="flex h-[min(36dvh,260px)] min-h-[180px] items-center justify-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="h-5 w-5 shrink-0 animate-spin" aria-hidden />
+            Загрузка…
+          </div>
+        ) : (
+          <div className="emoji-mart-host h-[min(36dvh,280px)] min-h-[180px] w-full max-w-full">
+            <Picker
+              data={payload.data}
+              i18n={payload.i18n}
+              locale="ru"
+              theme={isDark ? "dark" : "light"}
+              set="native"
+              onEmojiSelect={(emoji: EmojiSelectPayload) => {
+                const native = nativeFromEmojiMart(emoji);
+                if (native) onSelect(native);
               }}
-            >
-              {emoji}
-            </button>
-          ))}
-        </div>
+              previewPosition="none"
+              searchPosition="sticky"
+              navPosition="bottom"
+              dynamicWidth
+              maxFrequentRows={3}
+              skinTonePosition="search"
+              perLine={8}
+              emojiButtonSize={36}
+              emojiSize={24}
+            />
+          </div>
+        )}
       </div>
     </div>
   );

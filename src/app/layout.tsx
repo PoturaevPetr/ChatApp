@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
+import { NativeBootLayer } from "@/components/NativeBootLayer";
 import "./globals.css";
 
 const inter = Inter({ subsets: ["latin", "cyrillic"], variable: "--font-sans" });
@@ -14,6 +15,8 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   viewportFit: "cover",
+  /** Виртуальная клавиатура меняет visual viewport — лучше согласуется с innerHeight/vv на Android Chrome. */
+  interactiveWidget: "resizes-visual",
 };
 
 export default function RootLayout({
@@ -27,7 +30,7 @@ export default function RootLayout({
         <meta httpEquiv="Permissions-Policy" content="microphone=(self)" />
       </head>
       <body className={`${inter.variable} font-sans h-full antialiased`} suppressHydrationWarning>
-        {children}
+        <NativeBootLayer>{children}</NativeBootLayer>
       </body>
     </html>
   );

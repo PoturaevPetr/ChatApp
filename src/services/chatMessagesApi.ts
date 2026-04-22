@@ -104,3 +104,16 @@ export async function markRoomMessagesAsRead(accessToken: string, roomId: string
     throw new Error(`HTTP ${res.status}`);
   }
 }
+
+/** Пометить одно входящее сообщение как прочитанное (recipient = текущий пользователь). */
+export async function markMessageAsRead(accessToken: string, messageId: string): Promise<void> {
+  const id = messageId.trim();
+  if (!id) return;
+  const url = `${BASE_URL.replace(/\/$/, "")}/api/v1/messages/${encodeURIComponent(id)}/read`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (res.status === 204) return;
+  throw new Error(`HTTP ${res.status}`);
+}

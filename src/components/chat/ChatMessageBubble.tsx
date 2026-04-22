@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
-import { Check } from "lucide-react";
+import { Check, Loader2 } from "lucide-react";
 import type { ChatMessage, ReplyTo } from "@/stores/chatStore";
 import { formatMessageClock, getMessagePreviewText } from "@/utils/chatUtils";
 import { MessageBody } from "./ChatMessageBody";
@@ -17,7 +17,7 @@ const AXIS_LOCK_PX = 12;
 const LONG_PRESS_MS = 520;
 const LONG_PRESS_MOVE_CANCEL = 14;
 
-function OutgoingReceiptTicks({
+export function OutgoingReceiptTicks({
   status,
   variant = "onPrimary",
 }: {
@@ -61,6 +61,14 @@ export type ChatMessageBubbleProps = {
   onLongPress?: (rect: DOMRect) => void;
   /** Точные width/height как у пузырька в ленте (оверлей долгого нажатия). */
   anchorBox?: { width: number; height: number };
+  /** Аватар участника для строки реакций (data URL или https). */
+  resolveReactionAvatar?: (userId: string) => string | null | undefined;
+  /** Тап по чипу реакции: эмодзи на чипе и userId автора реакции (комната, серверный id сообщения). */
+  onReactionChipClick?: (emoji: string, chipUserId: string) => void;
+  /** Для подписи чипа (своя / чужая реакция). */
+  currentUserId?: string | null;
+  /** Групповой чат: у входящих — аватар отправителя слева от пузырька. */
+  groupIncomingAvatar?: boolean;
 };
 
 type DragSession = {
@@ -93,11 +101,25 @@ export function ChatMessageBubble({
   hideVisual = false,
   onLongPress,
   anchorBox,
+  resolveReactionAvatar,
+  onReactionChipClick,
+  currentUserId,
+  groupIncomingAvatar = false,
 }: ChatMessageBubbleProps) {
   const isAudioMessage =
     message.content.type === "file" && message.content.file.mimeType.startsWith("audio/");
   const isVideoMessage =
     message.content.type === "file" && message.content.file.mimeType.startsWith("video/");
+  const isImageMessage =
+    message.content.type === "file" && message.content.file.mimeType.toLowerCase().startsWith("image/");
+  /** Круг с % — только для «тяжёлых» файлов; не для фото, аудио и видео (у видео свой прогресс в плеере). */
+  const showFileUploadPercentRing =
+    message.isOwn &&
+    message.isUploading &&
+    message.content.type === "file" &&
+    !isVideoMessage &&
+    !isAudioMessage &&
+    !isImageMessage;
 
   const [dragX, setDragX] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
@@ -355,22 +377,27 @@ export function ChatMessageBubble({
 
   const bubbleLayout: MessageBubbleLayout = isAudioMessage ? "audio" : isVideoMessage ? "video" : "text";
   const ownVideoClearBubble = Boolean(message.isOwn && isVideoMessage);
+  const reactionChipsClickable =
+    Boolean(interactive && onReactionChipClick && !message.id.startsWith("msg_"));
+  const me = currentUserId?.trim().toLowerCase() ?? "";
+  const showGroupSenderAvatar = Boolean(groupIncomingAvatar && !message.isOwn);
+  const senderAvatarUrl = showGroupSenderAvatar ? (resolveReactionAvatar?.(message.senderId) ?? null) : null;
 
-  return (
-    <div className={rowClass} style={rowStyle}>
-      <div
-        ref={bubbleRef}
-        className={getMessageBubbleClassName(message.isOwn, bubbleLayout, {
-          fillAnchor: !!anchorBox,
-        })}
-        onMouseDown={interactive ? onMouseDown : undefined}
-        style={{
-          transform: anchorBox ? undefined : `translateX(${dragX}px)`,
-          transition: anchorBox || isDragging ? "none" : "transform 0.2s ease-out",
-          touchAction: interactive ? "pan-y" : undefined,
-        }}
-      >
-        <MessageBody
+  const bubbleDiv = (
+    <div
+      ref={bubbleRef}
+      className={getMessageBubbleClassName(message.isOwn, bubbleLayout, {
+        fillAnchor: !!anchorBox,
+        enclosedMaxWidth: showGroupSenderAvatar && !anchorBox,
+      })}
+      onMouseDown={interactive ? onMouseDown : undefined}
+      style={{
+        transform: anchorBox ? undefined : `translateX(${dragX}px)`,
+        transition: anchorBox || isDragging ? "none" : "transform 0.2s ease-out",
+        touchAction: interactive ? "pan-y" : undefined,
+      }}
+    >
+      <MessageBody
           content={message.content}
           isOwn={message.isOwn}
           messageTimestamp={message.timestamp}
@@ -378,28 +405,57 @@ export function ChatMessageBubble({
             message.isOwn && isVideoMessage && message.isUploading ? (message.uploadProgress ?? 0) : undefined
           }
           immediateMediaLoad={Boolean(anchorBox)}
+          messageId={message.id}
+          sequencePlayback={interactive}
         />
-        {message.isOwn && message.isUploading && !isVideoMessage ? (
-          <div className="mt-1">
-            <div
-              className={`mb-1 text-[10px] ${
-                ownVideoClearBubble ? "text-foreground/70" : message.isOwn ? "text-primary-foreground/80" : "text-foreground/60"
-              }`}
-            >
-              Загрузка {Math.max(1, Math.min(100, Math.round(message.uploadProgress ?? 0)))}%
-            </div>
-            <div
-              className={`h-1.5 w-full rounded-full overflow-hidden ${
-                ownVideoClearBubble ? "bg-foreground/12" : message.isOwn ? "bg-primary-foreground/25" : "bg-foreground/15"
-              }`}
-            >
-              <div
-                className={`h-full transition-[width] duration-300 ${
-                  ownVideoClearBubble ? "bg-primary" : message.isOwn ? "bg-primary-foreground" : "bg-foreground/70"
+        {showFileUploadPercentRing ? (
+          <div className="mt-2 flex flex-col items-center gap-1" aria-live="polite">
+            <div className="relative flex h-[3.25rem] w-[3.25rem] items-center justify-center">
+              <Loader2
+                className={`pointer-events-none absolute h-[3.25rem] w-[3.25rem] animate-spin ${
+                  message.isOwn ? "text-primary-foreground/22" : "text-foreground/20"
                 }`}
-                style={{ width: `${Math.max(1, Math.min(100, Math.round(message.uploadProgress ?? 0)))}%` }}
+                strokeWidth={1.2}
+                aria-hidden
               />
+              <svg className="absolute h-[3.25rem] w-[3.25rem] -rotate-90" viewBox="0 0 36 36" aria-hidden>
+                <circle
+                  cx="18"
+                  cy="18"
+                  r="15.915"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.4"
+                  className={message.isOwn ? "text-primary-foreground/18" : "text-foreground/14"}
+                />
+                <circle
+                  cx="18"
+                  cy="18"
+                  r="15.915"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.4"
+                  strokeLinecap="round"
+                  pathLength={100}
+                  strokeDasharray={`${Math.max(0.5, Math.min(100, Math.round(message.uploadProgress ?? 0)))} 100`}
+                  className={message.isOwn ? "text-primary-foreground" : "text-primary"}
+                />
+              </svg>
+              <span
+                className={`relative text-[10px] font-bold tabular-nums leading-none ${
+                  message.isOwn ? "text-primary-foreground" : "text-foreground"
+                }`}
+              >
+                {Math.max(0, Math.min(100, Math.round(message.uploadProgress ?? 0)))}%
+              </span>
             </div>
+            <span
+              className={`text-[10px] font-medium ${
+                message.isOwn ? "text-primary-foreground/78" : "text-foreground/60"
+              }`}
+            >
+              Загрузка файла…
+            </span>
           </div>
         ) : null}
         {message.isOwn && message.uploadError ? (
@@ -423,11 +479,123 @@ export function ChatMessageBubble({
           >
             {formatMessageClock(message.timestamp)}
           </p>
+          {message.isOwn && message.isUploading && !message.uploadError && isImageMessage ? (
+            <Loader2
+              className={`h-3.5 w-3.5 shrink-0 animate-spin ${
+                ownVideoClearBubble ? "text-primary/70" : "text-primary-foreground/75"
+              }`}
+              strokeWidth={2.5}
+              aria-label="Загрузка изображения"
+            />
+          ) : null}
           {message.isOwn && !message.isUploading && !message.uploadError ? (
             <OutgoingReceiptTicks status={message.status} variant={ownVideoClearBubble ? "onClear" : "onPrimary"} />
           ) : null}
         </div>
-      </div>
+        {(message.reactions?.length ?? 0) > 0 ? (
+          <div
+            className={`mt-1 flex min-w-0 flex-wrap gap-1 ${message.isOwn ? "justify-end" : "justify-start"}`}
+            aria-label="Реакции"
+          >
+            {message.reactions!.map((r) => {
+              const av = resolveReactionAvatar?.(r.userId);
+              const chipClass = `inline-flex max-w-full items-center gap-1 rounded-full border pl-1 pr-2.5 py-1 shadow-sm ${
+                message.isOwn
+                  ? "border-primary-foreground/30 bg-primary-foreground/22 backdrop-blur-[2px]"
+                  : "border-border/80 bg-muted/90 backdrop-blur-sm dark:border-white/12 dark:bg-muted/70"
+              }`;
+              const inner = (
+                <>
+                  {av ? (
+                    <img
+                      src={av}
+                      alt=""
+                      className="h-4 w-4 shrink-0 rounded-full object-cover ring-1 ring-black/10 dark:ring-white/15"
+                      loading="lazy"
+                    />
+                  ) : (
+                    <span
+                      className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[9px] font-semibold ring-1 ${
+                        message.isOwn
+                          ? "bg-primary-foreground/35 text-primary-foreground ring-primary-foreground/25"
+                          : "bg-background/80 text-muted-foreground ring-border/60 dark:bg-background/40 dark:ring-white/10"
+                      }`}
+                    >
+                      {(r.userId.slice(0, 1) || "?").toUpperCase()}
+                    </span>
+                  )}
+                  <span className="text-[13px] leading-none tabular-nums">{r.emoji}</span>
+                </>
+              );
+              if (reactionChipsClickable) {
+                return (
+                  <button
+                    key={`${r.userId}-${r.emoji}`}
+                    type="button"
+                    className={`${chipClass} cursor-pointer text-left transition-opacity hover:opacity-90 active:scale-[0.98] focus:outline-none focus-visible:ring-2 focus-visible:ring-foreground/20 focus-visible:ring-offset-0`}
+                    aria-label={
+                      me && r.userId.trim().toLowerCase() === me
+                        ? `Снять реакцию ${r.emoji}`
+                        : `Поставить реакцию ${r.emoji}`
+                    }
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onTouchStart={(e) => e.stopPropagation()}
+                    onClick={() => onReactionChipClick?.(r.emoji, r.userId)}
+                  >
+                    {inner}
+                  </button>
+                );
+              }
+              return (
+                <span key={`${r.userId}-${r.emoji}`} className={chipClass}>
+                  {inner}
+                </span>
+              );
+            })}
+          </div>
+        ) : null}
+    </div>
+  );
+
+  /**
+   * Группа, чужое: `w-full` + max 92% только у голосовых — иначе ряд сжимается по узкому плееру.
+   * Текст/файлы/видео — без `w-full`, ширина как у входящих в direct (ряд до max-w-[85%] по содержимому).
+   */
+  const groupIncomingRowClass = anchorBox
+    ? "flex h-full w-full min-w-0 items-start gap-2"
+    : isAudioMessage
+      ? "flex w-full min-w-0 max-w-[92%] items-start gap-2"
+      : "flex min-w-0 max-w-[85%] items-start gap-2";
+
+  return (
+    <div className={rowClass} style={rowStyle}>
+      {showGroupSenderAvatar ? (
+        <div className={groupIncomingRowClass}>
+          <div className="pointer-events-none shrink-0 pt-0.5" aria-hidden>
+            {senderAvatarUrl ? (
+              <img
+                src={senderAvatarUrl}
+                alt=""
+                className="h-8 w-8 rounded-full object-cover ring-1 ring-border/50 shadow-sm dark:ring-white/15"
+                loading="lazy"
+              />
+            ) : (
+              <span className="flex h-8 w-8 items-center justify-center rounded-full bg-muted text-[11px] font-semibold text-muted-foreground ring-1 ring-border/50 shadow-sm dark:ring-white/15">
+                {(message.senderId.slice(0, 1) || "?").toUpperCase()}
+              </span>
+            )}
+          </div>
+          {anchorBox ? (
+            <div className="relative min-h-0 min-w-0 flex-1">{bubbleDiv}</div>
+          ) : (
+            <div className="min-w-0 flex-1">{bubbleDiv}</div>
+          )}
+        </div>
+      ) : anchorBox ? (
+        <div className="relative h-full w-full min-w-0 shrink-0">{bubbleDiv}</div>
+      ) : (
+        bubbleDiv
+      )}
     </div>
   );
 }

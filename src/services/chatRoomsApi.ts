@@ -17,6 +17,8 @@ export interface RoomUser {
   birth_date?: string;
   avatar?: string | null;
   last_seen_at?: string | null;
+  /** admin | member | moderator — в ответе комнаты */
+  role?: string;
 }
 
 /** Последнее сообщение комнаты (превью в списке чатов). */
@@ -38,6 +40,9 @@ export interface Room {
   description: string;
   created_at: string;
   created_by: string;
+  /** direct | group — с сервера; для старых ответов можно вывести из users.length */
+  room_type?: string;
+  avatar?: string | null;
   users: RoomUser[];
   last_message?: RoomLastMessage | null;
   unread_count?: number;
@@ -79,15 +84,20 @@ export async function getRooms(accessToken: string): Promise<Room[]> {
     description: r.description ?? "",
     created_at: r.created_at ?? "",
     created_by: r.created_by ?? "",
-    users: Array.isArray(r.users) ? r.users.map((u: RoomUser) => ({
-      id: String(u.id),
-      first_name: u.first_name,
-      last_name: u.last_name,
-      middle_name: u.middle_name,
-      birth_date: u.birth_date,
-      avatar: u.avatar ?? null,
-      last_seen_at: u.last_seen_at ?? null,
-    })) : [],
+    room_type: typeof (r as { room_type?: unknown }).room_type === "string" ? (r as { room_type: string }).room_type : undefined,
+    avatar: typeof (r as { avatar?: unknown }).avatar === "string" ? (r as { avatar: string }).avatar : (r as { avatar?: null }).avatar ?? null,
+    users: Array.isArray(r.users)
+      ? r.users.map((u: RoomUser) => ({
+          id: String(u.id),
+          first_name: u.first_name,
+          last_name: u.last_name,
+          middle_name: u.middle_name,
+          birth_date: u.birth_date,
+          avatar: u.avatar ?? null,
+          last_seen_at: u.last_seen_at ?? null,
+          role: typeof u.role === "string" ? u.role : undefined,
+        }))
+      : [],
     last_message: r.last_message ?? null,
     unread_count: typeof (r as unknown as { unread_count?: unknown }).unread_count === "number" ? (r as unknown as { unread_count: number }).unread_count : 0,
   }));
@@ -128,8 +138,173 @@ export async function createRoom(
   };
 }
 
+export interface CreateGroupRoomParams {
+  name: string;
+  /** UUID участников кроме создателя (создатель добавляется на сервере). */
+  memberUserIds: string[];
+  /** data URL или URL изображения */
+  avatar?: string | null;
+}
+
 /**
- * Удалить чат "для меня".
+ * Создать групповую комнату (POST /api/v1/rooms/ с name + member_user_ids).
+ */
+export async function createGroupRoom(accessToken: string, params: CreateGroupRoomParams): Promise<Room> {
+  const url = `${BASE_URL.replace(/\/$/, "")}/api/v1/rooms/`;
+  const body: Record<string, unknown> = {
+    name: params.name.trim(),
+    member_user_ids: params.memberUserIds.map((id) => id.trim()).filter(Boolean),
+  };
+  if (params.avatar != null && String(params.avatar).trim() !== "") {
+    body.avatar = params.avatar;
+  }
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    const detail =
+      typeof (data as { detail?: string }).detail === "string"
+        ? (data as { detail: string }).detail
+        : res.statusText;
+    throw new Error(detail || `HTTP ${res.status}`);
+  }
+  const r = (await res.json()) as Room;
+  return {
+    id: String(r.id ?? ""),
+    name: r.name ?? "",
+    description: r.description ?? "",
+    created_at: r.created_at ?? "",
+    created_by: r.created_by ?? "",
+    room_type: typeof r.room_type === "string" ? r.room_type : "group",
+    avatar: typeof r.avatar === "string" ? r.avatar : r.avatar ?? null,
+    users: Array.isArray(r.users)
+      ? r.users.map((u: RoomUser) => ({
+          id: String(u.id),
+          first_name: u.first_name,
+          last_name: u.last_name,
+          middle_name: u.middle_name,
+          birth_date: u.birth_date,
+          avatar: u.avatar ?? null,
+          last_seen_at: u.last_seen_at ?? null,
+          role: typeof u.role === "string" ? u.role : undefined,
+        }))
+      : [],
+    last_message: r.last_message ?? null,
+    unread_count: typeof r.unread_count === "number" ? r.unread_count : 0,
+  };
+}
+
+export interface PatchGroupRoomBody {
+  name?: string;
+  description?: string;
+  /** Пустая строка — сбросить аватар */
+  avatar?: string | null;
+}
+
+/** Обновить группу (PATCH). Только администратор. */
+export async function patchGroupRoom(
+  accessToken: string,
+  roomId: string,
+  body: PatchGroupRoomBody,
+): Promise<Room> {
+  const id = roomId.trim();
+  const url = `${BASE_URL.replace(/\/$/, "")}/api/v1/rooms/${encodeURIComponent(id)}`;
+  const res = await fetch(url, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    const detail =
+      typeof (data as { detail?: string }).detail === "string"
+        ? (data as { detail: string }).detail
+        : res.statusText;
+    throw new Error(detail || `HTTP ${res.status}`);
+  }
+  return normalizeRoom(await res.json());
+}
+
+function normalizeRoom(r: Room): Room {
+  return {
+    id: String(r.id ?? ""),
+    name: r.name ?? "",
+    description: r.description ?? "",
+    created_at: r.created_at ?? "",
+    created_by: r.created_by ?? "",
+    room_type: typeof r.room_type === "string" ? r.room_type : "group",
+    avatar: typeof r.avatar === "string" ? r.avatar : r.avatar ?? null,
+    users: Array.isArray(r.users)
+      ? r.users.map((u: RoomUser) => ({
+          id: String(u.id),
+          first_name: u.first_name,
+          last_name: u.last_name,
+          middle_name: u.middle_name,
+          birth_date: u.birth_date,
+          avatar: u.avatar ?? null,
+          last_seen_at: u.last_seen_at ?? null,
+          role: typeof u.role === "string" ? u.role : undefined,
+        }))
+      : [],
+    last_message: r.last_message ?? null,
+    unread_count: typeof r.unread_count === "number" ? r.unread_count : 0,
+  };
+}
+
+/** Покинуть комнату (только себя). POST /api/v1/rooms/{room_id}/leave */
+export async function leaveRoom(accessToken: string, roomId: string): Promise<void> {
+  const id = roomId.trim();
+  if (!id) return;
+  const url = `${BASE_URL.replace(/\/$/, "")}/api/v1/rooms/${encodeURIComponent(id)}/leave`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    const detail =
+      typeof (data as { detail?: string }).detail === "string"
+        ? (data as { detail: string }).detail
+        : res.statusText;
+    throw new Error(detail || `HTTP ${res.status}`);
+  }
+}
+
+/** Исключить участника из группы (только админ). DELETE .../members/{user_id} */
+export async function removeRoomMember(
+  accessToken: string,
+  roomId: string,
+  memberUserId: string,
+): Promise<void> {
+  const rid = roomId.trim();
+  const mid = memberUserId.trim();
+  if (!rid || !mid) return;
+  const url = `${BASE_URL.replace(/\/$/, "")}/api/v1/rooms/${encodeURIComponent(rid)}/members/${encodeURIComponent(mid)}`;
+  const res = await fetch(url, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    const detail =
+      typeof (data as { detail?: string }).detail === "string"
+        ? (data as { detail: string }).detail
+        : res.statusText;
+    throw new Error(detail || `HTTP ${res.status}`);
+  }
+}
+
+/**
+ * Удалить чат полностью (для direct — оба; для group — только создатель комнаты).
  * DELETE /api/v1/rooms/{room_id}
  */
 export async function deleteRoom(accessToken: string, roomId: string): Promise<void> {

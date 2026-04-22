@@ -19,7 +19,8 @@ export async function uploadRoomAttachments(
   fileName: string,
   mimeType: string,
   thumbnail: Blob | null,
-  thumbFileName = "thumb.jpg"
+  thumbFileName = "thumb.jpg",
+  onUploadProgress?: (percent0to100: number) => void,
 ): Promise<UploadAttachmentsResult> {
   const form = new FormData();
   form.append("file", new File([file], fileName, { type: mimeType }));
@@ -27,36 +28,107 @@ export async function uploadRoomAttachments(
     form.append("thumbnail", new File([thumbnail], thumbFileName, { type: "image/jpeg" }));
   }
   const url = `${BASE_URL.replace(/\/$/, "")}/api/v1/rooms/${encodeURIComponent(roomId)}/attachments`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${accessToken}` },
-    body: form,
+
+  return new Promise<UploadAttachmentsResult>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.setRequestHeader("Authorization", `Bearer ${accessToken}`);
+    xhr.responseType = "json";
+    xhr.upload.onprogress = (ev) => {
+      if (!onUploadProgress) return;
+      if (ev.lengthComputable && ev.total > 0) {
+        onUploadProgress(Math.min(100, Math.max(0, Math.round((100 * ev.loaded) / ev.total))));
+      }
+    };
+    xhr.onload = () => {
+      let raw: unknown = xhr.response;
+      if (raw == null && xhr.responseText) {
+        try {
+          raw = JSON.parse(xhr.responseText);
+        } catch {
+          raw = {};
+        }
+      }
+      const data = (typeof raw === "object" && raw ? raw : {}) as {
+        attachment_id?: string;
+        thumbnail_attachment_id?: string | null;
+        detail?: string;
+      };
+      if (xhr.status >= 200 && xhr.status < 300 && data.attachment_id) {
+        resolve({
+          attachment_id: data.attachment_id,
+          thumbnail_attachment_id: data.thumbnail_attachment_id ?? null,
+        });
+        return;
+      }
+      const detail = typeof data.detail === "string" ? data.detail : `Upload failed (${xhr.status})`;
+      reject(new Error(detail));
+    };
+    xhr.onerror = () => reject(new Error("Сеть: не удалось загрузить файл"));
+    xhr.onabort = () => reject(new Error("Загрузка отменена"));
+    xhr.send(form);
   });
-  const data = (await res.json().catch(() => ({}))) as {
-    attachment_id?: string;
-    thumbnail_attachment_id?: string | null;
-    detail?: string;
-  };
-  if (!res.ok) {
-    throw new Error(typeof data.detail === "string" ? data.detail : `Upload failed (${res.status})`);
-  }
-  if (!data.attachment_id) {
-    throw new Error("Invalid upload response");
-  }
-  return {
-    attachment_id: data.attachment_id,
-    thumbnail_attachment_id: data.thumbnail_attachment_id ?? null,
-  };
 }
 
-export async function fetchAttachmentBlob(accessToken: string, attachmentId: string): Promise<Blob> {
+export async function fetchAttachmentBlob(
+  accessToken: string,
+  attachmentId: string,
+  onDownloadProgress?: (percent0to100: number) => void,
+): Promise<Blob> {
   const url = `${BASE_URL.replace(/\/$/, "")}/api/v1/attachments/${encodeURIComponent(attachmentId)}`;
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
-  if (!res.ok) {
-    const t = await res.text();
-    throw new Error(t || `Download failed (${res.status})`);
+
+  if (!onDownloadProgress) {
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    if (!res.ok) {
+      const t = await res.text();
+      throw new Error(t || `Download failed (${res.status})`);
+    }
+    return res.blob();
   }
-  return res.blob();
+
+  return new Promise<Blob>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("GET", url);
+    xhr.setRequestHeader("Authorization", `Bearer ${accessToken}`);
+    xhr.responseType = "blob";
+    let lastReported = -1;
+    xhr.onprogress = (ev) => {
+      if (!ev.lengthComputable || ev.total <= 0) {
+        if (ev.loaded > 0 && lastReported < 0) {
+          lastReported = 0;
+          onDownloadProgress(0);
+        }
+        return;
+      }
+      const pct = Math.min(98, Math.max(0, Math.round((100 * ev.loaded) / ev.total)));
+      if (pct !== lastReported) {
+        lastReported = pct;
+        onDownloadProgress(pct);
+      }
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        const body = xhr.response as Blob;
+        if (body == null) {
+          reject(new Error("Пустой ответ при скачивании"));
+          return;
+        }
+        onDownloadProgress(99);
+        resolve(body);
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        const t = typeof reader.result === "string" ? reader.result : xhr.statusText;
+        reject(new Error(t || `Download failed (${xhr.status})`));
+      };
+      reader.onerror = () => reject(new Error(`Download failed (${xhr.status})`));
+      reader.readAsText(xhr.response as Blob);
+    };
+    xhr.onerror = () => reject(new Error("Сеть: не удалось скачать файл"));
+    xhr.onabort = () => reject(new Error("Скачивание отменено"));
+    xhr.send();
+  });
 }
 
 export type AttachmentTranscriptionStatus = "done" | "pending" | "failed" | "none";

@@ -1,10 +1,11 @@
 "use client";
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Loader2, Play, Pause, Captions, MoreVertical, Download } from "lucide-react";
+import { Loader2, Play, Pause, Captions, MoreVertical, Download, FileText } from "lucide-react";
 import { createPortal } from "react-dom";
 import type { ChatMessageContent, ChatMessageFile } from "@/stores/chatStore";
 import { createImagePreview } from "@/utils/chatUtils";
+import { MessageTextWithLinks } from "./MessageTextWithLinks";
 import { getValidAuthTokens } from "@/lib/validAuthToken";
 import {
   fetchAttachmentBlob,
@@ -21,6 +22,10 @@ import {
   releaseBlobUrl,
   takeCachedBlobUrl,
 } from "@/lib/attachmentMediaCache";
+import { CHAT_MEDIA_PLAY_NEXT, requestPlayNextChatMediaAfter } from "@/lib/chatMediaSequence";
+
+/** Останавливаем остальные аудио/видео в чате при старте воспроизведения (detail.playerId — свой id). */
+const CHAT_MEDIA_PLAY = "chatapp:media-play";
 
 const MAX_PARALLEL_MEDIA_LOADS = 3;
 let activeMediaLoads = 0;
@@ -183,6 +188,8 @@ export function AudioPlayer({
   attachmentId,
   caption,
   variant = "chat",
+  messageId,
+  sequencePlayback = false,
 }: {
   src: string;
   fileName: string;
@@ -193,11 +200,19 @@ export function AudioPlayer({
   caption?: string;
   /** profile — нейтральный фон страницы: явные цвета «мои / собеседника». */
   variant?: "chat" | "profile";
+  /** id сообщения в ленте — для автозапуска следующего аудио/кружка */
+  messageId?: string;
+  /** Включить цепочку «после окончания — следующее медиа в чате» */
+  sequencePlayback?: boolean;
 }) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const barRef = useRef<HTMLDivElement>(null);
   const rafRef = useRef<number | null>(null);
   const playerIdRef = useRef<string>(`${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  const messageIdRef = useRef(messageId);
+  messageIdRef.current = messageId;
+  const sequencePlaybackRef = useRef(sequencePlayback);
+  sequencePlaybackRef.current = sequencePlayback;
   const [audioSrc, setAudioSrc] = useState<string>(src);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -244,7 +259,7 @@ export function AudioPlayer({
   }, [audioSrc, isAudioReady]);
 
   useEffect(() => {
-    const onOtherAudioPlay = (e: Event) => {
+    const onOtherMediaPlay = (e: Event) => {
       const ce = e as CustomEvent<{ playerId?: string }>;
       const otherId = ce.detail?.playerId;
       if (!otherId || otherId === playerIdRef.current) return;
@@ -255,9 +270,30 @@ export function AudioPlayer({
       setIsPlaying(false);
       setCurrentTime(0);
     };
-    window.addEventListener("chatapp:audio-play", onOtherAudioPlay as EventListener);
-    return () => window.removeEventListener("chatapp:audio-play", onOtherAudioPlay as EventListener);
+    window.addEventListener(CHAT_MEDIA_PLAY, onOtherMediaPlay as EventListener);
+    return () => window.removeEventListener(CHAT_MEDIA_PLAY, onOtherMediaPlay as EventListener);
   }, []);
+
+  useEffect(() => {
+    if (!sequencePlayback || !messageId) return;
+    const mid = messageId;
+    const onPlayNext = (e: Event) => {
+      const ce = e as CustomEvent<{ messageId?: string }>;
+      if (ce.detail?.messageId !== mid) return;
+      const el = audioRef.current;
+      if (!el) return;
+      setLoadError(null);
+      window.dispatchEvent(
+        new CustomEvent(CHAT_MEDIA_PLAY, { detail: { playerId: playerIdRef.current } }),
+      );
+      void el.play().then(() => setIsPlaying(true)).catch(() => {
+        setIsPlaying(false);
+        setLoadError("Воспроизведение не поддерживается или ошибка");
+      });
+    };
+    window.addEventListener(CHAT_MEDIA_PLAY_NEXT, onPlayNext as EventListener);
+    return () => window.removeEventListener(CHAT_MEDIA_PLAY_NEXT, onPlayNext as EventListener);
+  }, [sequencePlayback, messageId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -291,46 +327,20 @@ export function AudioPlayer({
     }
   }, []);
 
-  useEffect(() => {
-    const el = audioRef.current;
-    if (!el) return;
-    const onTimeUpdate = () => {
-      setCurrentTime(el.currentTime);
-      updateDurationFromEl();
-    };
-    const onPlay = () => setIsPlaying(true);
-    const onPause = () => setIsPlaying(false);
-    const onEnded = () => {
-      setIsPlaying(false);
-      setCurrentTime(0);
-    };
-    const onCanPlayThrough = () => setIsAudioReady(true);
-    el.addEventListener("timeupdate", onTimeUpdate);
-    el.addEventListener("loadedmetadata", updateDurationFromEl);
-    el.addEventListener("loadeddata", updateDurationFromEl);
-    el.addEventListener("durationchange", updateDurationFromEl);
-    el.addEventListener("canplaythrough", onCanPlayThrough);
-    el.addEventListener("play", onPlay);
-    el.addEventListener("pause", onPause);
-    el.addEventListener("ended", onEnded);
-    updateDurationFromEl();
-    return () => {
-      el.removeEventListener("timeupdate", onTimeUpdate);
-      el.removeEventListener("loadedmetadata", updateDurationFromEl);
-      el.removeEventListener("loadeddata", updateDurationFromEl);
-      el.removeEventListener("durationchange", updateDurationFromEl);
-      el.removeEventListener("canplaythrough", onCanPlayThrough);
-      el.removeEventListener("play", onPlay);
-      el.removeEventListener("pause", onPause);
-      el.removeEventListener("ended", onEnded);
-    };
-  }, [src, updateDurationFromEl]);
+  const handleAudioEnded = useCallback(() => {
+    setIsPlaying(false);
+    setCurrentTime(0);
+    if (sequencePlaybackRef.current && messageIdRef.current) {
+      requestPlayNextChatMediaAfter(messageIdRef.current);
+    }
+  }, []);
 
+  /** Пока идёт звук — тянем currentTime каждый кадр (timeupdate у браузеров редкий). */
   useEffect(() => {
     if (!isPlaying) return;
     const tick = () => {
       const el = audioRef.current;
-      if (el) {
+      if (el && !el.paused) {
         setCurrentTime(el.currentTime);
         updateDurationFromEl();
       }
@@ -353,7 +363,7 @@ export function AudioPlayer({
     } else {
       setLoadError(null);
       window.dispatchEvent(
-        new CustomEvent("chatapp:audio-play", { detail: { playerId: playerIdRef.current } }),
+        new CustomEvent(CHAT_MEDIA_PLAY, { detail: { playerId: playerIdRef.current } }),
       );
       const p = el.play();
       if (p && typeof (p as Promise<void>).then === "function") {
@@ -539,13 +549,45 @@ export function AudioPlayer({
 
   return (
     <div
-      className={`flex min-w-0 w-full max-w-full flex-col gap-1 overflow-hidden rounded-xl px-2 py-1.5 ring-inset sm:px-2.5 sm:py-2 ${shellCls}`}
+      className={`flex min-w-0 w-full max-w-full flex-col gap-1 overflow-visible rounded-xl px-2 py-1.5 ring-inset sm:px-2.5 sm:py-2 ${shellCls}`}
+      style={
+        variant === "chat"
+          ? {
+              transform: isPlaying ? "scale(1.05)" : "scale(1)",
+              transformOrigin: "center center",
+              transition: "transform 220ms ease-out",
+            }
+          : undefined
+      }
     >
       <audio
         ref={audioRef}
         src={audioSrc}
         preload="auto"
         onError={() => setLoadError("Не удалось загрузить аудио")}
+        onTimeUpdate={(e) => {
+          const el = e.currentTarget;
+          setCurrentTime(el.currentTime);
+          if (Number.isFinite(el.duration) && el.duration > 0) {
+            setDuration((d) => (d !== el.duration ? el.duration : d));
+          }
+        }}
+        onLoadedMetadata={(e) => {
+          const el = e.currentTarget;
+          if (Number.isFinite(el.duration) && el.duration > 0) setDuration(el.duration);
+        }}
+        onLoadedData={(e) => {
+          const el = e.currentTarget;
+          if (Number.isFinite(el.duration) && el.duration > 0) setDuration(el.duration);
+        }}
+        onDurationChange={(e) => {
+          const el = e.currentTarget;
+          if (Number.isFinite(el.duration) && el.duration > 0) setDuration(el.duration);
+        }}
+        onCanPlayThrough={() => setIsAudioReady(true)}
+        onPlay={() => setIsPlaying(true)}
+        onPause={() => setIsPlaying(false)}
+        onEnded={handleAudioEnded}
       />
 
       <div className="flex items-center gap-1.5">
@@ -634,16 +676,24 @@ export function AudioPlayer({
         const textCls = captionTextCls;
         if (same) {
           return (
-            <div className={`text-[11px] leading-snug whitespace-pre-wrap break-words ${textCls}`}>{tr}</div>
+            <MessageTextWithLinks
+              text={tr}
+              isOwn={isOwn}
+              paragraphClassName={`text-[11px] leading-snug ${textCls}`}
+            />
           );
         }
         return (
           <div className="space-y-1">
             {cap ? (
-              <p className={`text-sm leading-snug whitespace-pre-wrap break-words ${textCls}`}>{cap}</p>
+              <MessageTextWithLinks text={cap} isOwn={isOwn} paragraphClassName={`text-sm leading-snug ${textCls}`} />
             ) : null}
             {tr ? (
-              <div className={`text-[11px] leading-snug whitespace-pre-wrap break-words ${textCls}`}>{tr}</div>
+              <MessageTextWithLinks
+                text={tr}
+                isOwn={isOwn}
+                paragraphClassName={`text-[11px] leading-snug ${textCls}`}
+              />
             ) : null}
           </div>
         );
@@ -652,7 +702,28 @@ export function AudioPlayer({
   );
 }
 
-function LazyImage({ dataUrl, alt, fileName }: { dataUrl: string; alt: string; fileName: string }) {
+const bubbleImageClass =
+  "max-w-full max-h-64 rounded-xl object-contain transition-opacity duration-300 ease-out";
+
+/** blob:/http(s): — без canvas-превью, чтобы не было лишней смены кадра при отправке. */
+function LazyImageDirectUrl({ dataUrl, alt, fileName }: { dataUrl: string; alt: string; fileName: string }) {
+  const [viewerOpen, setViewerOpen] = useState(false);
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setViewerOpen(true)}
+        className="block relative max-w-full text-left"
+        aria-label="Открыть изображение"
+      >
+        <img src={dataUrl} alt={alt} decoding="async" className={bubbleImageClass} />
+      </button>
+      <FullscreenImageViewer open={viewerOpen} src={dataUrl} fileName={fileName} onClose={() => setViewerOpen(false)} />
+    </>
+  );
+}
+
+function LazyImageFromBase64({ dataUrl, alt, fileName }: { dataUrl: string; alt: string; fileName: string }) {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [fullShown, setFullShown] = useState(false);
   const [viewerOpen, setViewerOpen] = useState(false);
@@ -679,18 +750,101 @@ function LazyImage({ dataUrl, alt, fileName }: { dataUrl: string; alt: string; f
         className="block relative text-left"
         aria-label="Открыть изображение"
       >
-      {previewUrl && !fullShown && (
-        <img src={previewUrl} alt={alt} className="max-w-full max-h-64 rounded-xl object-contain" />
-      )}
-      <img
-        src={dataUrl}
-        alt={alt}
-        className="max-w-full max-h-64 rounded-xl object-contain"
-        style={fullShown ? undefined : { position: "absolute", width: 0, height: 0, opacity: 0, pointerEvents: "none" }}
-        onLoad={() => setFullShown(true)}
-      />
+        {previewUrl && !fullShown && (
+          <img src={previewUrl} alt={alt} className={bubbleImageClass} />
+        )}
+        <img
+          src={dataUrl}
+          alt={alt}
+          className={bubbleImageClass}
+          style={fullShown ? undefined : { position: "absolute", width: 0, height: 0, opacity: 0, pointerEvents: "none" }}
+          onLoad={() => setFullShown(true)}
+        />
       </button>
       <FullscreenImageViewer open={viewerOpen} src={dataUrl} fileName={fileName} onClose={() => setViewerOpen(false)} />
+    </>
+  );
+}
+
+function LazyImage({ dataUrl, alt, fileName }: { dataUrl: string; alt: string; fileName: string }) {
+  const isDirect =
+    dataUrl.startsWith("blob:") || dataUrl.startsWith("http://") || dataUrl.startsWith("https://");
+  if (isDirect) {
+    return <LazyImageDirectUrl dataUrl={dataUrl} alt={alt} fileName={fileName} />;
+  }
+  return <LazyImageFromBase64 dataUrl={dataUrl} alt={alt} fileName={fileName} />;
+}
+
+/**
+ * Меняет src только после декодирования следующего кадра — без белой вспышки и рывка при смене blob → сервер / thumb → full.
+ * Отзыв локального pick-бlob после того, как на экране уже целевой URL.
+ */
+function BubbleChatImage({
+  targetSrc,
+  viewerHref,
+  alt,
+  fileName,
+  subline,
+  localPickerBlob,
+}: {
+  targetSrc: string;
+  viewerHref: string;
+  alt: string;
+  fileName: string;
+  subline?: React.ReactNode;
+  localPickerBlob?: string | null;
+}) {
+  const [committedSrc, setCommittedSrc] = useState(targetSrc);
+  const [viewerOpen, setViewerOpen] = useState(false);
+  const localBlobRef = useRef(localPickerBlob);
+  localBlobRef.current = localPickerBlob;
+
+  useEffect(() => {
+    if (targetSrc === committedSrc) return;
+    let cancelled = false;
+    const prevCommitted = committedSrc;
+    const wanted = targetSrc;
+    const img = new Image();
+    img.decoding = "async";
+    const apply = () => {
+      if (cancelled) return;
+      const local = localBlobRef.current;
+      if (
+        local &&
+        prevCommitted === local &&
+        wanted !== local &&
+        typeof local === "string" &&
+        local.startsWith("blob:")
+      ) {
+        try {
+          URL.revokeObjectURL(local);
+        } catch {
+          //
+        }
+      }
+      setCommittedSrc(wanted);
+    };
+    img.onload = apply;
+    img.onerror = apply;
+    img.src = wanted;
+    if (img.complete && img.naturalWidth > 0) apply();
+    return () => {
+      cancelled = true;
+    };
+  }, [targetSrc, committedSrc]);
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setViewerOpen(true)}
+        className="block relative max-w-full text-left"
+        aria-label="Открыть изображение"
+      >
+        <img src={committedSrc} alt={alt} decoding="async" className={bubbleImageClass} />
+        {subline}
+      </button>
+      <FullscreenImageViewer open={viewerOpen} src={viewerHref} fileName={fileName} onClose={() => setViewerOpen(false)} />
     </>
   );
 }
@@ -709,8 +863,182 @@ async function ciphertextBlobToObjectUrl(
   return URL.createObjectURL(blob);
 }
 
+function FileDownloadProgressGauge({
+  percent,
+  isOwn,
+  hint,
+}: {
+  percent: number;
+  isOwn: boolean;
+  hint?: string;
+}) {
+  const pct = Math.max(0, Math.min(100, Math.round(percent)));
+  return (
+    <div className="flex flex-col items-center gap-1 py-1" aria-live="polite" aria-busy="true">
+      <div className="relative flex h-[3.25rem] w-[3.25rem] items-center justify-center">
+        <Loader2
+          className={`pointer-events-none absolute h-[3.25rem] w-[3.25rem] animate-spin ${
+            isOwn ? "text-primary-foreground/22" : "text-foreground/20"
+          }`}
+          strokeWidth={1.2}
+          aria-hidden
+        />
+        <svg className="absolute h-[3.25rem] w-[3.25rem] -rotate-90" viewBox="0 0 36 36" aria-hidden>
+          <circle
+            cx="18"
+            cy="18"
+            r="15.915"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.4"
+            className={isOwn ? "text-primary-foreground/18" : "text-foreground/14"}
+          />
+          <circle
+            cx="18"
+            cy="18"
+            r="15.915"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.4"
+            strokeLinecap="round"
+            pathLength={100}
+            strokeDasharray={`${Math.max(0.5, pct)} 100`}
+            className={isOwn ? "text-primary-foreground" : "text-primary"}
+          />
+        </svg>
+        <span
+          className={`relative text-[10px] font-bold tabular-nums leading-none ${
+            isOwn ? "text-primary-foreground" : "text-foreground"
+          }`}
+        >
+          {pct}%
+        </span>
+      </div>
+      {hint ? (
+        <span
+          className={`text-[10px] font-medium ${isOwn ? "text-primary-foreground/78" : "text-foreground/60"}`}
+        >
+          {hint}
+        </span>
+      ) : (
+        <span
+          className={`text-[10px] font-medium ${isOwn ? "text-primary-foreground/78" : "text-foreground/60"}`}
+        >
+          Скачивание файла…
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** Документы и прочие типы: в ленте только метаданные; скачивание по тапу. */
+function RefLinkedDocumentAttachment({
+  file,
+  text,
+  isOwn,
+}: {
+  file: ChatMessageFile;
+  text?: string;
+  isOwn: boolean;
+}) {
+  const ref = file.file_ref;
+  const [downloadUi, setDownloadUi] = useState<null | { pct: number; hint?: string }>(null);
+  const busy = downloadUi !== null;
+  const onDownload = async () => {
+    if (!ref?.full_key_b64 || !ref.full_nonce_b64) {
+      window.alert("Нет ключей для скачивания файла.");
+      return;
+    }
+    if (!window.confirm(`Скачать «${file.name}» с сервера?`)) return;
+    setDownloadUi({ pct: 0 });
+    try {
+      const tokens = await getValidAuthTokens();
+      if (!tokens?.access_token) throw new Error("Нет авторизации");
+      const blob = await fetchAttachmentBlob(tokens.access_token, ref.attachment_id, (p) => {
+        setDownloadUi((prev) => {
+          if (!prev) return { pct: p };
+          return { ...prev, pct: Math.max(prev.pct, p) };
+        });
+      });
+      setDownloadUi((prev) => (prev ? { ...prev, pct: 99, hint: "Расшифровка…" } : { pct: 99, hint: "Расшифровка…" }));
+      const url = await ciphertextBlobToObjectUrl(blob, file.mimeType, ref.full_key_b64, ref.full_nonce_b64);
+      setDownloadUi((prev) => (prev ? { ...prev, pct: 100, hint: "Сохранение…" } : { pct: 100, hint: "Сохранение…" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = file.name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 120_000);
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : "Не удалось скачать файл");
+    } finally {
+      setDownloadUi(null);
+    }
+  };
+
+  const ring = isOwn
+    ? "border-primary/45 bg-primary-foreground/10"
+    : "border-foreground/15 bg-background/55 dark:bg-black/20";
+
+  return (
+    <div className="min-w-0 max-w-full space-y-0.5">
+      {text ? <MessageTextWithLinks text={text} isOwn={isOwn} /> : null}
+      <div
+        className={`flex w-full max-w-[min(100%,20rem)] min-w-0 flex-col items-stretch rounded-xl border px-2.5 py-2 ${ring}`}
+      >
+        {busy && downloadUi ? (
+          <>
+            <div className="flex min-w-0 items-center gap-2 border-b border-black/5 pb-2 dark:border-white/10">
+              <FileText
+                className={`h-7 w-7 shrink-0 ${isOwn ? "text-primary-foreground/75" : "text-foreground/75"}`}
+                strokeWidth={1.75}
+                aria-hidden
+              />
+              <span
+                className={`min-w-0 flex-1 truncate text-xs font-medium leading-tight ${
+                  isOwn ? "text-primary-foreground/90" : "text-foreground/85"
+                }`}
+                title={file.name}
+              >
+                {file.name}
+              </span>
+            </div>
+            <FileDownloadProgressGauge
+              percent={downloadUi.pct}
+              isOwn={isOwn}
+              hint={downloadUi.hint}
+            />
+          </>
+        ) : (
+          <button
+            type="button"
+            onClick={() => void onDownload()}
+            className="flex w-full min-w-0 items-center gap-2.5 text-left"
+          >
+            <FileText
+              className={`h-9 w-9 shrink-0 ${isOwn ? "text-primary-foreground/90" : "text-foreground/85"}`}
+              strokeWidth={1.75}
+              aria-hidden
+            />
+            <span
+              className={`min-w-0 flex-1 truncate text-sm font-medium leading-tight ${
+                isOwn ? "text-primary-foreground" : "text-foreground"
+              }`}
+              title={file.name}
+            >
+              {file.name}
+            </span>
+            <Download className="h-4 w-4 shrink-0 opacity-70" aria-hidden />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function videoMessageColumnClass(isOwn: boolean): string {
-  return `flex flex-col space-y-0.5 ${isOwn ? "items-end" : "items-start"}`;
+  return `flex flex-col space-y-0.5 overflow-visible ${isOwn ? "items-end" : "items-start"}`;
 }
 
 export function chatVideoCircleWrapperClassName(isOwn: boolean, layout: "chat" | "grid" = "chat"): string {
@@ -757,14 +1085,23 @@ export function ChatCircleVideo({
   fileName,
   uploadProgress,
   layout = "chat",
+  messageId,
+  sequencePlayback = false,
 }: {
   src: string;
   isOwn: boolean;
   fileName: string;
   uploadProgress?: number | null;
   layout?: "chat" | "grid";
+  messageId?: string;
+  sequencePlayback?: boolean;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const videoPlayerIdRef = useRef(`${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  const messageIdRef = useRef(messageId);
+  messageIdRef.current = messageId;
+  const sequencePlaybackRef = useRef(sequencePlayback);
+  sequencePlaybackRef.current = sequencePlayback;
   const [playing, setPlaying] = useState(false);
   const [mediaReady, setMediaReady] = useState(false);
   const [progressTick, setProgressTick] = useState({ current: 0, duration: 0 });
@@ -782,12 +1119,34 @@ export function ChatCircleVideo({
   }, [src]);
 
   useEffect(() => {
+    const onOtherMediaPlay = (e: Event) => {
+      const ce = e as CustomEvent<{ playerId?: string }>;
+      const id = ce.detail?.playerId;
+      if (!id || id === videoPlayerIdRef.current) return;
+      const v = videoRef.current;
+      if (v && !v.paused) v.pause();
+    };
+    window.addEventListener(CHAT_MEDIA_PLAY, onOtherMediaPlay as EventListener);
+    return () => window.removeEventListener(CHAT_MEDIA_PLAY, onOtherMediaPlay as EventListener);
+  }, []);
+
+  useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
     const sync = () => setPlaying(!v.paused);
-    const onPlay = () => setPlaying(true);
+    const onPlay = () => {
+      window.dispatchEvent(
+        new CustomEvent(CHAT_MEDIA_PLAY, { detail: { playerId: videoPlayerIdRef.current } }),
+      );
+      setPlaying(true);
+    };
     const onPause = () => setPlaying(false);
-    const onEnded = () => setPlaying(false);
+    const onEnded = () => {
+      setPlaying(false);
+      if (sequencePlaybackRef.current && messageIdRef.current) {
+        requestPlayNextChatMediaAfter(messageIdRef.current);
+      }
+    };
     const syncProgress = () => {
       const d = v.duration;
       setProgressTick({
@@ -814,34 +1173,114 @@ export function ChatCircleVideo({
   }, [src]);
 
   useEffect(() => {
+    if (!sequencePlayback || !messageId || layout !== "chat") return;
+    const mid = messageId;
+    const onPlayNext = (e: Event) => {
+      const ce = e as CustomEvent<{ messageId?: string }>;
+      if (ce.detail?.messageId !== mid) return;
+      const v = videoRef.current;
+      if (!v) return;
+      v.muted = false;
+      void v.play().catch(() => {});
+    };
+    window.addEventListener(CHAT_MEDIA_PLAY_NEXT, onPlayNext as EventListener);
+    return () => window.removeEventListener(CHAT_MEDIA_PLAY_NEXT, onPlayNext as EventListener);
+  }, [sequencePlayback, messageId, layout, src]);
+
+  useEffect(() => {
+    if (uploading) return;
+    const v = videoRef.current;
+    if (!v) return;
+
+    const markIfHasFrame = () => {
+      if (v.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) setMediaReady(true);
+    };
+
+    const nudgeFirstFrame = () => {
+      try {
+        if (
+          v.readyState >= HTMLMediaElement.HAVE_METADATA &&
+          v.readyState < HTMLMediaElement.HAVE_CURRENT_DATA
+        ) {
+          const dur = v.duration;
+          const step =
+            Number.isFinite(dur) && dur > 0
+              ? Math.min(0.08, Math.max(0.001, dur * 0.02))
+              : 0.001;
+          if (v.currentTime === 0) v.currentTime = step;
+        }
+      } catch {
+        setMediaReady(true);
+      }
+    };
+
+    const onErr = () => setMediaReady(true);
+
+    v.addEventListener("loadedmetadata", markIfHasFrame);
+    v.addEventListener("loadedmetadata", nudgeFirstFrame);
+    v.addEventListener("loadeddata", markIfHasFrame);
+    v.addEventListener("canplay", markIfHasFrame);
+    v.addEventListener("seeked", markIfHasFrame);
+    v.addEventListener("error", onErr);
+    markIfHasFrame();
+    nudgeFirstFrame();
+    const raf = requestAnimationFrame(() => {
+      markIfHasFrame();
+      nudgeFirstFrame();
+    });
+    return () => {
+      cancelAnimationFrame(raf);
+      v.removeEventListener("loadedmetadata", markIfHasFrame);
+      v.removeEventListener("loadedmetadata", nudgeFirstFrame);
+      v.removeEventListener("loadeddata", markIfHasFrame);
+      v.removeEventListener("canplay", markIfHasFrame);
+      v.removeEventListener("seeked", markIfHasFrame);
+      v.removeEventListener("error", onErr);
+    };
+  }, [src, uploading]);
+
+  useEffect(() => {
     if (!uploading) return;
     const v = videoRef.current;
     if (v && !v.paused) v.pause();
   }, [uploading]);
 
-  return (
-    <div className={chatVideoCircleWrapperClassName(isOwn, layout)}>
-      <video
-        key={src}
-        ref={videoRef}
-        src={src}
-        playsInline
-        preload="metadata"
-        className={`h-full w-full object-cover transition-opacity duration-200 ${
-          uploading ? "pointer-events-none" : "cursor-pointer"
-        } ${!uploading && !mediaReady ? "opacity-0" : "opacity-100"}`}
-        aria-label={fileName}
-        onLoadedData={() => setMediaReady(true)}
-        onError={() => setMediaReady(true)}
-        onClick={
-          uploading
-            ? undefined
-            : () => {
-                const v = videoRef.current;
-                if (v && !v.paused) v.pause();
-              }
+  const scaleShell =
+    layout === "chat" && !uploading
+      ? {
+          transform: playing ? "scale(1.06)" : "scale(1)",
+          transformOrigin: "center center",
+          transition: "transform 220ms ease-out",
         }
-      />
+      : undefined;
+
+  return (
+    <div
+      className={`${layout === "chat" && !uploading ? "origin-center overflow-visible p-2" : "overflow-visible"}`}
+      style={scaleShell}
+    >
+      <div className={chatVideoCircleWrapperClassName(isOwn, layout)}>
+        <video
+          key={src}
+          ref={videoRef}
+          src={src}
+          muted
+          playsInline
+          preload="auto"
+          className={`h-full w-full object-cover transition-opacity duration-200 ${
+            uploading ? "pointer-events-none" : "cursor-pointer"
+          } ${!uploading && !mediaReady ? "opacity-0" : "opacity-100"}`}
+          aria-label={fileName}
+          onError={() => setMediaReady(true)}
+          onClick={
+            uploading
+              ? undefined
+              : () => {
+                  const v = videoRef.current;
+                  if (v && !v.paused) v.pause();
+                }
+          }
+        />
       {!uploading && !mediaReady ? (
         <div className="pointer-events-none absolute inset-0 z-[4] flex items-center justify-center">
           <div
@@ -884,7 +1323,10 @@ export function ChatCircleVideo({
             onClick={(e) => {
               e.preventDefault();
               e.stopPropagation();
-              void videoRef.current?.play();
+              const v = videoRef.current;
+              if (!v) return;
+              v.muted = false;
+              void v.play();
             }}
             aria-label={`Воспроизвести: ${fileName}`}
           >
@@ -900,6 +1342,7 @@ export function ChatCircleVideo({
           {formatAudioTime(progressTick.current)} / {formatAudioTime(progressTick.duration)}
         </div>
       ) : null}
+      </div>
     </div>
   );
 }
@@ -919,13 +1362,15 @@ function videoAwareSecondaryClass70(isOwn: boolean, isVideo: boolean): string {
   return isOwn ? "text-primary-foreground/70" : "text-muted-foreground";
 }
 
-function RemoteFileAttachment({
+function RemoteFileAttachmentInner({
   file,
   text,
   isOwn,
   messageTimestamp,
   videoUploadProgress,
   immediateMediaLoad = false,
+  messageId,
+  sequencePlayback = false,
 }: {
   file: ChatMessageFile;
   text?: string;
@@ -934,19 +1379,25 @@ function RemoteFileAttachment({
   videoUploadProgress?: number | null;
   /** true — не ждать IntersectionObserver (клон пузырька в оверлее меню). */
   immediateMediaLoad?: boolean;
+  messageId?: string;
+  sequencePlayback?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const inViewport = useNearViewport(containerRef, 700);
   const shouldLoadMedia = immediateMediaLoad || inViewport;
-  const inlineDataUrl = file.data ? `data:${file.mimeType};base64,${file.data}` : null;
+  const inlineDisplayUrl =
+    file.data && file.data.length > 0
+      ? `data:${file.mimeType};base64,${file.data}`
+      : file.localPreviewUrl ?? null;
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [fullUrl, setFullUrl] = useState<string | null>(null);
   const [previewErr, setPreviewErr] = useState<string | null>(null);
   const [loadingPreview, setLoadingPreview] = useState(false);
-  const [viewerOpen, setViewerOpen] = useState(false);
   const ref = file.file_ref;
   const emittedPreviewReadyRef = useRef(false);
   const emittedFullReadyRef = useRef(false);
+  const messageTsRef = useRef(messageTimestamp);
+  messageTsRef.current = messageTimestamp;
 
   useEffect(() => {
     if (!shouldLoadMedia) return;
@@ -965,9 +1416,9 @@ function RemoteFileAttachment({
       }
     };
 
-    setLoadingPreview(!inlineDataUrl);
+    setLoadingPreview(!inlineDisplayUrl);
     setPreviewErr(null);
-    setPreviewUrl((prev) => prev || inlineDataUrl);
+    setPreviewUrl((prev) => prev || inlineDisplayUrl);
     setFullUrl(null);
 
     const previewId = ref.thumb_attachment_id || ref.attachment_id;
@@ -1035,7 +1486,7 @@ function RemoteFileAttachment({
     };
   }, [
     shouldLoadMedia,
-    inlineDataUrl,
+    inlineDisplayUrl,
     ref?.attachment_id,
     ref?.thumb_attachment_id,
     ref?.full_key_b64,
@@ -1048,7 +1499,7 @@ function RemoteFileAttachment({
 
   useEffect(() => {
     if (!shouldLoadMedia) return;
-    if (!ref || !previewUrl || fullUrl || !file.mimeType.startsWith("image/")) return;
+    if (!ref || !previewUrl || !file.mimeType.startsWith("image/")) return;
     if (!ref.thumb_attachment_id) return;
     if (!ref.full_key_b64 || !ref.full_nonce_b64) return;
     let cancelled = false;
@@ -1075,7 +1526,8 @@ function RemoteFileAttachment({
       };
     }
 
-    const mediaPriority = Number.isFinite(Date.parse(messageTimestamp || "")) ? Date.parse(messageTimestamp || "") : 0;
+    const ts = messageTsRef.current || "";
+    const mediaPriority = Number.isFinite(Date.parse(ts)) ? Date.parse(ts) : 0;
     const t = window.setTimeout(() => {
       void (async () => {
         try {
@@ -1110,47 +1562,69 @@ function RemoteFileAttachment({
       window.clearTimeout(t);
       releaseFullLease();
     };
-  }, [shouldLoadMedia, ref, previewUrl, fullUrl, file.mimeType, messageTimestamp]);
+    // Не добавлять fullUrl: после setFullUrl cleanup отозвал бы blob при том же <img src>.
+    // Не добавлять previewUrl как строку: смена URL превью при том же вложении снова вызвала бы cleanup.
+    // messageTimestamp — через ref (приоритет очереди), иначе лишний перезапуск → тот же отзыв blob.
+  }, [
+    shouldLoadMedia,
+    ref?.attachment_id,
+    ref?.thumb_attachment_id,
+    ref?.full_key_b64,
+    ref?.full_nonce_b64,
+    Boolean(previewUrl),
+    file.mimeType,
+  ]);
 
   const isImage = file.mimeType.startsWith("image/");
   const isAudio = file.mimeType.startsWith("audio/");
   const isVideo = file.mimeType.startsWith("video/");
 
   if (!shouldLoadMedia) {
-    if (inlineDataUrl) {
+    if (inlineDisplayUrl) {
       if (isImage) {
         return (
           <div ref={containerRef} className="space-y-0.5">
-            {text && <p className="text-sm leading-snug whitespace-pre-wrap break-words">{text}</p>}
-            <LazyImage dataUrl={inlineDataUrl} alt={file.name} fileName={file.name} />
+            {text ? <MessageTextWithLinks text={text} isOwn={isOwn} /> : null}
+            <LazyImage dataUrl={inlineDisplayUrl} alt={file.name} fileName={file.name} />
           </div>
         );
       }
       if (isAudio) {
         return (
           <div ref={containerRef} className="space-y-0.5">
-            <AudioPlayer src={inlineDataUrl} fileName={file.name} isOwn={isOwn} caption={text} />
+            <AudioPlayer
+              src={inlineDisplayUrl}
+              fileName={file.name}
+              isOwn={isOwn}
+              caption={text}
+              messageId={messageId}
+              sequencePlayback={sequencePlayback}
+            />
           </div>
         );
       }
       if (isVideo) {
         return (
           <div ref={containerRef} className={videoMessageColumnClass(isOwn)}>
-            {text ? <p className={videoCaptionClass(true)}>{text}</p> : null}
+            {text ? (
+              <MessageTextWithLinks text={text} isOwn={isOwn} paragraphClassName={videoCaptionClass(true)} />
+            ) : null}
             <ChatCircleVideo
-              src={inlineDataUrl}
+              src={inlineDisplayUrl}
               isOwn={isOwn}
               fileName={file.name}
               uploadProgress={videoUploadProgress}
+              messageId={messageId}
+              sequencePlayback={sequencePlayback}
             />
           </div>
         );
       }
       return (
         <div ref={containerRef} className="space-y-0.5">
-          {text && <p className="text-sm leading-snug whitespace-pre-wrap break-words">{text}</p>}
+          {text ? <MessageTextWithLinks text={text} isOwn={isOwn} /> : null}
           <a
-            href={inlineDataUrl}
+            href={inlineDisplayUrl}
             download={file.name}
             className={`text-sm leading-snug underline ${isOwn ? "text-primary-foreground/90" : "text-primary"}`}
           >
@@ -1161,7 +1635,7 @@ function RemoteFileAttachment({
     }
     return (
       <div ref={containerRef} className={isVideo ? videoMessageColumnClass(isOwn) : "space-y-0.5"}>
-        {text && <p className={videoCaptionClass(isVideo)}>{text}</p>}
+        {text ? <MessageTextWithLinks text={text} isOwn={isOwn} paragraphClassName={videoCaptionClass(isVideo)} /> : null}
         {isVideo ? (
           <ChatCircleVideoPlaceholder isOwn={isOwn} />
         ) : (
@@ -1176,9 +1650,21 @@ function RemoteFileAttachment({
   if (loadingPreview) {
     return (
       <div ref={containerRef} className={isVideo ? videoMessageColumnClass(isOwn) : "space-y-0.5"}>
-        {text && <p className={videoCaptionClass(isVideo)}>{text}</p>}
+        {text ? <MessageTextWithLinks text={text} isOwn={isOwn} paragraphClassName={videoCaptionClass(isVideo)} /> : null}
         {isVideo ? (
           <ChatCircleVideoPlaceholder isOwn={isOwn} />
+        ) : isImage ? (
+          <div
+            className="max-h-64 min-h-[120px] max-w-full rounded-xl bg-muted/35 border border-dashed border-border/50"
+            aria-hidden
+          />
+        ) : isAudio ? (
+          <div
+            className={`flex min-h-[52px] w-full max-w-[min(100%,280px)] items-center rounded-2xl border px-3 ${
+              isOwn ? "border-primary/35 bg-primary/10" : "border-border/60 bg-muted/30"
+            }`}
+            aria-hidden
+          />
         ) : (
           <div
             className={`flex items-center gap-1.5 text-xs py-0.5 ${videoAwareSecondaryClass(isOwn, isVideo)}`}
@@ -1194,37 +1680,34 @@ function RemoteFileAttachment({
   if (previewErr) {
     return (
       <div ref={containerRef} className={isVideo ? videoMessageColumnClass(isOwn) : "space-y-0.5"}>
-        {text && <p className={videoCaptionClass(isVideo)}>{text}</p>}
+        {text ? <MessageTextWithLinks text={text} isOwn={isOwn} paragraphClassName={videoCaptionClass(isVideo)} /> : null}
         <p className="text-xs text-destructive leading-snug">{previewErr}</p>
       </div>
     );
   }
 
   if (isImage && previewUrl) {
+    const targetSrc = fullUrl || previewUrl;
     const href = fullUrl || previewUrl;
     return (
       <div ref={containerRef} className="space-y-0.5">
-        {text && <p className="text-sm leading-snug whitespace-pre-wrap break-words">{text}</p>}
-        <button
-          type="button"
-          onClick={() => setViewerOpen(true)}
-          className="block relative text-left"
-          aria-label="Открыть изображение"
-        >
-          <img
-            src={fullUrl || previewUrl}
-            alt={file.name}
-            className="max-w-full max-h-64 rounded-xl object-contain transition-opacity duration-200"
-          />
-          {!fullUrl && ref?.thumb_attachment_id ? (
-            <span
-              className={`text-[10px] mt-1 block ${isOwn ? "text-primary-foreground/65" : "text-muted-foreground"}`}
-            >
-              Загрузка в лучшем качестве…
-            </span>
-          ) : null}
-        </button>
-        <FullscreenImageViewer open={viewerOpen} src={href} fileName={file.name} onClose={() => setViewerOpen(false)} />
+        {text ? <MessageTextWithLinks text={text} isOwn={isOwn} /> : null}
+        <BubbleChatImage
+          targetSrc={targetSrc}
+          viewerHref={href}
+          alt={file.name}
+          fileName={file.name}
+          subline={
+            !fullUrl && ref?.thumb_attachment_id ? (
+              <span
+                className={`text-[10px] mt-1 block ${isOwn ? "text-primary-foreground/65" : "text-muted-foreground"}`}
+              >
+                Загрузка в лучшем качестве…
+              </span>
+            ) : null
+          }
+          localPickerBlob={file.localPreviewUrl?.startsWith("blob:") ? file.localPreviewUrl : null}
+        />
       </div>
     );
   }
@@ -1238,6 +1721,8 @@ function RemoteFileAttachment({
           isOwn={isOwn}
           attachmentId={ref?.attachment_id}
           caption={text}
+          messageId={messageId}
+          sequencePlayback={sequencePlayback}
         />
       </div>
     );
@@ -1246,12 +1731,16 @@ function RemoteFileAttachment({
   if (isVideo && previewUrl) {
     return (
       <div ref={containerRef} className={videoMessageColumnClass(isOwn)}>
-        {text ? <p className={videoCaptionClass(true)}>{text}</p> : null}
+        {text ? (
+              <MessageTextWithLinks text={text} isOwn={isOwn} paragraphClassName={videoCaptionClass(true)} />
+            ) : null}
         <ChatCircleVideo
           src={previewUrl}
           isOwn={isOwn}
           fileName={file.name}
           uploadProgress={videoUploadProgress}
+          messageId={messageId}
+          sequencePlayback={sequencePlayback}
         />
       </div>
     );
@@ -1260,7 +1749,7 @@ function RemoteFileAttachment({
   if (previewUrl) {
     return (
       <div ref={containerRef} className="space-y-0.5">
-        {text && <p className="text-sm leading-snug whitespace-pre-wrap break-words">{text}</p>}
+        {text ? <MessageTextWithLinks text={text} isOwn={isOwn} /> : null}
         <a
           href={previewUrl}
           download={file.name}
@@ -1275,23 +1764,40 @@ function RemoteFileAttachment({
   return <div ref={containerRef} />;
 }
 
+function RemoteFileAttachment(
+  props: React.ComponentProps<typeof RemoteFileAttachmentInner>,
+) {
+  const ref = props.file.file_ref;
+  const m = props.file.mimeType || "";
+  const loadMediaRemotely =
+    m.startsWith("image/") || m.startsWith("audio/") || m.startsWith("video/");
+  if (ref && !loadMediaRemotely) {
+    return <RefLinkedDocumentAttachment file={props.file} text={props.text} isOwn={props.isOwn} />;
+  }
+  return <RemoteFileAttachmentInner {...props} />;
+}
+
 export function MessageBody({
   content,
   isOwn,
   messageTimestamp,
   videoUploadProgress,
   immediateMediaLoad = false,
+  messageId,
+  sequencePlayback = false,
 }: {
   content: ChatMessageContent;
   isOwn: boolean;
   messageTimestamp?: string;
   videoUploadProgress?: number | null;
   immediateMediaLoad?: boolean;
+  messageId?: string;
+  sequencePlayback?: boolean;
 }) {
   const replyTo = "reply_to" in content ? content.reply_to : undefined;
   const main =
     content.type === "text" ? (
-      <p className="text-sm leading-snug whitespace-pre-wrap break-words">{content.text || ""}</p>
+      <MessageTextWithLinks text={content.text || ""} isOwn={isOwn} />
     ) : (
       (() => {
         const { file, text } = content;
@@ -1304,23 +1810,101 @@ export function MessageBody({
               messageTimestamp={messageTimestamp}
               videoUploadProgress={videoUploadProgress}
               immediateMediaLoad={immediateMediaLoad}
+              messageId={messageId}
+              sequencePlayback={sequencePlayback}
             />
+          );
+        }
+        const mtLocal = file.mimeType.toLowerCase();
+        if (file.localPreviewUrl && mtLocal.startsWith("image/")) {
+          return (
+            <div className="space-y-0.5">
+              {text ? <MessageTextWithLinks text={text} isOwn={isOwn} /> : null}
+              <LazyImage dataUrl={file.localPreviewUrl} alt={file.name} fileName={file.name} />
+            </div>
+          );
+        }
+        if (file.localPreviewUrl && mtLocal.startsWith("audio/")) {
+          return (
+            <div className="space-y-0.5">
+              <AudioPlayer
+                src={file.localPreviewUrl}
+                fileName={file.name}
+                isOwn={isOwn}
+                caption={text}
+                messageId={messageId}
+                sequencePlayback={sequencePlayback}
+              />
+            </div>
+          );
+        }
+        if (file.localPreviewUrl && mtLocal.startsWith("video/")) {
+          return (
+            <div className={videoMessageColumnClass(isOwn)}>
+              {text ? (
+                <MessageTextWithLinks text={text} isOwn={isOwn} paragraphClassName={videoCaptionClass(true)} />
+              ) : null}
+              <ChatCircleVideo
+                src={file.localPreviewUrl}
+                isOwn={isOwn}
+                fileName={file.name}
+                uploadProgress={videoUploadProgress}
+                messageId={messageId}
+                sequencePlayback={sequencePlayback}
+              />
+            </div>
           );
         }
         const mediaLoading = !file.data || file.data.length === 0;
         if (mediaLoading) {
-          const loadingVideo = file.mimeType.startsWith("video/");
+          const mt = file.mimeType.toLowerCase();
+          const loadingVideo = mt.startsWith("video/");
+          const loadingImage = mt.startsWith("image/");
+          const loadingAudio = mt.startsWith("audio/");
           return (
             <div className={loadingVideo ? videoMessageColumnClass(isOwn) : "space-y-0.5"}>
-              {text && <p className={videoCaptionClass(loadingVideo)}>{text}</p>}
+              {text ? (
+              <MessageTextWithLinks text={text} isOwn={isOwn} paragraphClassName={videoCaptionClass(loadingVideo)} />
+            ) : null}
               {loadingVideo ? (
                 <ChatCircleVideoPlaceholder isOwn={isOwn} />
+              ) : loadingImage ? (
+                <div
+                  className="max-h-64 min-h-[120px] max-w-full rounded-xl bg-muted/35 border border-dashed border-border/50"
+                  aria-hidden
+                />
+              ) : loadingAudio ? (
+                <div
+                  className={`flex min-h-[52px] w-full max-w-[min(100%,280px)] items-center rounded-2xl border px-3 ${
+                    isOwn ? "border-primary/35 bg-primary/10" : "border-border/60 bg-muted/30"
+                  }`}
+                  aria-hidden
+                />
               ) : (
                 <div
-                  className={`flex items-center gap-1.5 text-xs py-1 ${videoAwareSecondaryClass(isOwn, loadingVideo)}`}
+                  className={`flex min-w-0 max-w-full items-center gap-2 rounded-lg border px-2 py-1.5 ${
+                    isOwn
+                      ? "border-primary/40 bg-primary-foreground/10"
+                      : "border-foreground/12 bg-background/50 dark:bg-black/15"
+                  }`}
                 >
-                  <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
-                  <span>Загрузка медиа…</span>
+                  <FileText
+                    className={`h-7 w-7 shrink-0 ${isOwn ? "text-primary-foreground/85" : "text-foreground/80"}`}
+                    strokeWidth={1.75}
+                    aria-hidden
+                  />
+                  <span
+                    className={`min-w-0 flex-1 truncate text-xs font-medium ${
+                      isOwn ? "text-primary-foreground" : "text-foreground"
+                    }`}
+                    title={file.name}
+                  >
+                    {file.name}
+                  </span>
+                  <Loader2
+                    className={`h-3.5 w-3.5 shrink-0 animate-spin ${videoAwareSecondaryClass(isOwn, loadingVideo)}`}
+                    aria-hidden
+                  />
                 </div>
               )}
             </div>
@@ -1333,23 +1917,34 @@ export function MessageBody({
         if (isVideo) {
           return (
             <div className={videoMessageColumnClass(isOwn)}>
-              {text ? <p className={videoCaptionClass(true)}>{text}</p> : null}
+              {text ? (
+                <MessageTextWithLinks text={text} isOwn={isOwn} paragraphClassName={videoCaptionClass(true)} />
+              ) : null}
               <ChatCircleVideo
                 src={dataUrl}
                 isOwn={isOwn}
                 fileName={file.name}
                 uploadProgress={videoUploadProgress}
+                messageId={messageId}
+                sequencePlayback={sequencePlayback}
               />
             </div>
           );
         }
         return (
           <div className="space-y-0.5">
-            {!isAudio && text ? (
-              <p className="text-sm leading-snug whitespace-pre-wrap break-words">{text}</p>
-            ) : null}
+            {!isAudio && text ? <MessageTextWithLinks text={text} isOwn={isOwn} /> : null}
             {isImage ? <LazyImage dataUrl={dataUrl} alt={file.name} fileName={file.name} /> : null}
-            {isAudio ? <AudioPlayer src={dataUrl} fileName={file.name} isOwn={isOwn} caption={text} /> : null}
+            {isAudio ? (
+              <AudioPlayer
+                src={dataUrl}
+                fileName={file.name}
+                isOwn={isOwn}
+                caption={text}
+                messageId={messageId}
+                sequencePlayback={sequencePlayback}
+              />
+            ) : null}
             {!isImage && !isAudio && (
               <a
                 href={dataUrl}
@@ -1364,7 +1959,7 @@ export function MessageBody({
       })()
     );
   return (
-    <div className="space-y-1 min-w-0 overflow-hidden">
+    <div className="space-y-1 min-w-0 overflow-visible">
       {replyTo && (
         <div
           className={`text-[11px] rounded-lg px-2 py-1 truncate leading-tight ${

@@ -1,6 +1,7 @@
 "use client";
 
 import { create } from "zustand";
+import { Capacitor } from "@capacitor/core";
 import { getValidAuthTokens } from "@/lib/validAuthToken";
 import { chatWebSocket } from "@/services/chatWebSocket";
 import { useChatStore } from "@/stores/chatStore";
@@ -10,6 +11,12 @@ interface WebSocketState {
   connect: (userId: string, accessToken: string) => void;
   disconnect: () => void;
   ensureConnected: (userId: string) => Promise<void>;
+  /**
+   * После разблокировки / возврата из фона на мобильном WebSocket часто мёртвый при readyState OPEN,
+   * либо уже закрыт без переподключения. На нативе — принудительный disconnect + connect; в браузере —
+   * только если сокет не открыт.
+   */
+  syncConnectionAfterForeground: (userId: string) => Promise<void>;
 }
 
 export const useWebSocketStore = create<WebSocketState>((set, get) => ({
@@ -18,13 +25,37 @@ export const useWebSocketStore = create<WebSocketState>((set, get) => ({
   ensureConnected: async (userId: string) => {
     if (!userId) return;
     if (chatWebSocket.isConnected()) return;
-    if (chatWebSocket.isConnecting()) return;
     const tokens = await getValidAuthTokens();
     if (!tokens?.access_token) return;
-    // За время await другой вызов мог уже подключиться.
+    if (chatWebSocket.isConnected()) return;
+    // «Вечный» CONNECTING после смены сети — обрываем и подключаемся заново
+    if (chatWebSocket.isConnecting()) {
+      chatWebSocket.disconnect();
+      set({ isConnected: false });
+    }
     if (chatWebSocket.isConnected()) return;
     if (chatWebSocket.isConnecting()) return;
     get().connect(userId, tokens.access_token);
+  },
+
+  syncConnectionAfterForeground: async (userId: string) => {
+    if (!userId) return;
+    const tokens = await getValidAuthTokens();
+    if (!tokens?.access_token) return;
+    const native = Capacitor.isNativePlatform();
+    if (native) {
+      chatWebSocket.disconnect();
+      set({ isConnected: false });
+      get().connect(userId, tokens.access_token);
+      return;
+    }
+    if (chatWebSocket.isConnecting()) {
+      chatWebSocket.disconnect();
+      set({ isConnected: false });
+    }
+    if (!chatWebSocket.isConnected()) {
+      get().connect(userId, tokens.access_token);
+    }
   },
 
   connect: (userId: string, accessToken: string) => {
@@ -33,7 +64,7 @@ export const useWebSocketStore = create<WebSocketState>((set, get) => ({
         set({ isConnected: true });
         const chat = useChatStore.getState();
         chat.rejoinRoomIfNeeded();
-        void chat.loadChats(userId);
+        // loadChats вызывается до connect (см. WebSocketInitializer), чтобы кэш/HTTP не ждали сокет.
       },
       onClose: () => set({ isConnected: false }),
     });

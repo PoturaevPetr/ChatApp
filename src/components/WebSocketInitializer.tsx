@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import { Capacitor, type PluginListenerHandle } from "@capacitor/core";
+import { App } from "@capacitor/app";
 import { useAuthStore } from "@/stores/authStore";
 import { useWebSocketStore } from "@/stores/websocketStore";
 import { useChatStore } from "@/stores/chatStore";
@@ -21,7 +23,11 @@ export function WebSocketInitializer() {
   const removeMessageFromActiveChat = useChatStore((s) => s.removeMessageFromActiveChat);
   const removeChatByRoomId = useChatStore((s) => s.removeChatByRoomId);
   const clearActiveChat = useChatStore((s) => s.clearActiveChat);
+  const applyRoomMemberRemoved = useChatStore((s) => s.applyRoomMemberRemoved);
+  const loadChats = useChatStore((s) => s.loadChats);
   const updatePeerPresence = useChatStore((s) => s.updatePeerPresence);
+  const applyMessageReaction = useChatStore((s) => s.applyMessageReaction);
+  const setPeerTyping = useChatStore((s) => s.setPeerTyping);
   const activeRoomId = useChatStore((s) => s.activeRoomId);
   const connectedRef = useRef(false);
   const activeRoomIdRef = useRef(activeRoomId);
@@ -58,6 +64,8 @@ export function WebSocketInitializer() {
     let cancelled = false;
     getValidAuthTokens().then((tokens) => {
       if (cancelled || !tokens?.access_token) return;
+      // Список чатов с API/кэшем не должен ждать WebSocket — иначе пустой экран до onOpen.
+      void useChatStore.getState().loadChats(user.id);
       connect(user.id, tokens.access_token);
       connectedRef.current = true;
     });
@@ -70,6 +78,68 @@ export function WebSocketInitializer() {
       connectedRef.current = false;
     };
   }, [isAuthenticated, user?.id, connect, disconnect]);
+
+  /** После разблокировки экрана / возврата из фона восстанавливаем WebSocket (особенно на iOS/Android). */
+  useEffect(() => {
+    if (!isAuthenticated || !user?.id) return;
+    const uid = user.id;
+
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleSync = () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        debounceTimer = null;
+        void useWebSocketStore.getState().syncConnectionAfterForeground(uid);
+      }, 400);
+    };
+
+    let wasHidden = false;
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") {
+        wasHidden = true;
+        return;
+      }
+      if (document.visibilityState === "visible" && wasHidden) {
+        wasHidden = false;
+        scheduleSync();
+      }
+    };
+
+    document.addEventListener("visibilitychange", onVisibility);
+
+    /** Смена Wi‑Fi ↔ мобильная сеть: появился маршрут — переподключаемся (без этого сокет часто не поднимается). */
+    const onOnline = () => scheduleSync();
+    window.addEventListener("online", onOnline);
+    /** Сразу сбрасываем «мертвый» OPEN/CONNECTING, чтобы не крутился вечный спиннер до таймаута. */
+    const onOffline = () => {
+      useWebSocketStore.getState().disconnect();
+    };
+    window.addEventListener("offline", onOffline);
+
+    let pauseHandle: PluginListenerHandle | undefined;
+    let resumeHandle: PluginListenerHandle | undefined;
+    const native = Capacitor.isNativePlatform();
+
+    const registerApp = async () => {
+      if (!native) return;
+      pauseHandle = await App.addListener("pause", () => {
+        wasHidden = true;
+      });
+      resumeHandle = await App.addListener("resume", () => {
+        scheduleSync();
+      });
+    };
+    void registerApp();
+
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+      if (debounceTimer) clearTimeout(debounceTimer);
+      void pauseHandle?.remove();
+      void resumeHandle?.remove();
+    };
+  }, [isAuthenticated, user?.id]);
 
   useEffect(() => {
     if (!user?.id) return;
@@ -140,12 +210,56 @@ export function WebSocketInitializer() {
         });
       }
 
+      if (message.type === "user_typing" && data) {
+        const payload = data as { user_id?: string; room_id?: string; is_typing?: boolean };
+        const uid = String(payload.user_id ?? "");
+        const roomId = String(payload.room_id ?? "");
+        const isTyping = payload.is_typing !== false;
+        if (roomId && uid && uid !== user.id) {
+          setPeerTyping(roomId, uid, isTyping);
+        }
+      }
+
+      if (message.type === "message_reaction" && data) {
+        const payload = data as {
+          room_id?: string;
+          message_id?: string;
+          user_id?: string;
+          emoji?: string;
+          removed?: boolean;
+        };
+        const roomId = payload.room_id ? String(payload.room_id) : "";
+        const msgId = payload.message_id ? String(payload.message_id) : "";
+        const uid = payload.user_id ? String(payload.user_id) : "";
+        const emoji = String(payload.emoji ?? "");
+        const removed = Boolean(payload.removed);
+        if (roomId && msgId && uid) {
+          applyMessageReaction({ roomId, messageId: msgId, userId: uid, emoji, removed });
+        }
+      }
+
       if (message.type === "room_deleted" && data) {
         const payload = data as { room_id?: string };
         const roomId = payload.room_id ? String(payload.room_id) : "";
         if (roomId) {
           removeChatByRoomId(roomId);
           if (activeRoomIdRef.current === roomId) clearActiveChat();
+        }
+      }
+
+      if (message.type === "room_member_removed" && data) {
+        const payload = data as { room_id?: string; user_id?: string };
+        const roomId = payload.room_id ? String(payload.room_id) : "";
+        const uid = payload.user_id ? String(payload.user_id) : "";
+        if (roomId && uid && user.id) {
+          applyRoomMemberRemoved(roomId, uid, user.id);
+        }
+      }
+
+      if (message.type === "room_updated" && data) {
+        const payload = data as { room_id?: string };
+        if (payload.room_id && user.id) {
+          void loadChats(user.id, { force: true });
         }
       }
 
@@ -172,6 +286,10 @@ export function WebSocketInitializer() {
     removeChatByRoomId,
     clearActiveChat,
     updatePeerPresence,
+    applyRoomMemberRemoved,
+    loadChats,
+    applyMessageReaction,
+    setPeerTyping,
   ]);
 
   return null;

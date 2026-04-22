@@ -1,6 +1,11 @@
 export type MessageBubbleClassOptions = {
   /** Точные размеры как в чате: пузырёк на всю обёртку (без max-w-% от узкого родителя). */
   fillAnchor?: boolean;
+  /**
+   * Ряд «аватар + пузырёк» в группе: снаружи уже `max-w-[85%]` как у входящих в direct.
+   * Пузырёк заполняет колонку справа от аватара, без повторного 85% от узкого родителя.
+   */
+  enclosedMaxWidth?: boolean;
 };
 
 export type MessageBubbleLayout = "text" | "audio" | "video";
@@ -14,16 +19,21 @@ export function getMessageBubbleClassName(
   if (layout === "video") {
     const width = opts?.fillAnchor
       ? "h-full w-full max-w-none min-h-0"
-      : "max-w-[min(92%,300px)]";
+      : opts?.enclosedMaxWidth
+        ? "w-full min-w-0 max-w-[min(92%,300px)]"
+        : "max-w-[min(92%,300px)]";
     return `${width} min-w-0 overflow-visible rounded-2xl bg-transparent px-1 py-1 text-foreground shadow-none ring-0 ring-transparent dark:bg-transparent dark:shadow-none group select-none transition-shadow duration-200 sm:px-1.5 sm:py-1.5`;
   }
 
   const width = opts?.fillAnchor
     ? "h-full w-full max-w-none min-h-0"
-    : layout === "audio"
-      ? "w-full max-w-[92%]"
-      : "max-w-[85%]";
-  const base = `${width} min-w-0 overflow-hidden rounded-2xl px-3 py-1.5 group select-none transition-shadow duration-200 shadow-sm sm:px-3.5 sm:py-2`;
+    : opts?.enclosedMaxWidth
+      ? "w-full min-w-0 max-w-full"
+      : layout === "audio"
+        ? "w-full max-w-[92%]"
+        : "max-w-[85%]";
+  const overflowCls = layout === "audio" ? "overflow-visible" : "overflow-hidden";
+  const base = `${width} min-w-0 ${overflowCls} rounded-2xl px-3 py-1.5 group select-none transition-shadow duration-200 shadow-sm sm:px-3.5 sm:py-2`;
   if (isOwn) {
     return `${base} rounded-br-md bg-primary text-primary-foreground shadow-black/10 ring-1 ring-inset ring-white/20 dark:shadow-black/35`;
   }

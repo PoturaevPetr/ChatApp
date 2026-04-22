@@ -134,3 +134,48 @@ export async function loadPeerChatMediaItems(
   items.sort((a, b) => new Date(a.sentAt).getTime() - new Date(b.sentAt).getTime());
   return { roomId, items, error: null };
 }
+
+/** Вложения из групповой комнаты по `room_id` (участник должен быть в комнате). */
+export async function loadRoomChatMediaItems(
+  accessToken: string,
+  currentUserId: string,
+  roomId: string,
+  privateKeyPem: string,
+): Promise<{ roomId: string | null; items: PeerMediaItem[]; error: string | null }> {
+  const rid = roomId.trim();
+  if (!rid) {
+    return { roomId: null, items: [], error: null };
+  }
+  const rooms = await getRooms(accessToken);
+  const room = rooms.find((r) => String(r.id) === rid);
+  const me = currentUserId.trim().toLowerCase();
+  const isMember = room?.users?.some((u) => String(u.id).toLowerCase() === me);
+  if (!room || !isMember) {
+    return { roomId: null, items: [], error: null };
+  }
+
+  const batches: MessageResponse[] = [];
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const chunk = await getMessages(accessToken, PAGE_SIZE, page * PAGE_SIZE, false, rid, false);
+    if (!chunk.length) break;
+    batches.push(...chunk);
+    if (chunk.length < PAGE_SIZE) break;
+  }
+
+  const items: PeerMediaItem[] = [];
+  for (const m of batches) {
+    const content = await decryptMessageContent(m, privateKeyPem, accessToken);
+    if (!content || content.type !== "file") continue;
+    const item = fileMessageToItem(
+      String(m.message_id),
+      m.sent_at,
+      content.file,
+      String(m.sender_id ?? ""),
+      currentUserId,
+    );
+    if (item) items.push(item);
+  }
+
+  items.sort((a, b) => new Date(a.sentAt).getTime() - new Date(b.sentAt).getTime());
+  return { roomId: rid, items, error: null };
+}

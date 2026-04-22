@@ -34,7 +34,9 @@ mkdir -p "$GRADLE_USER_HOME"
 # Очистка
 echo "🧹 Очистка предыдущих сборок..."
 rm -rf out .next
-# Не удаляем android целиком — он может уже быть добавлен
+# Папку android не удаляем: при «обнулении» вручную достаточно снова запустить скрипт — выполнится
+# `cap add android` (если папки нет) и `cap sync`, который перезаписывает сгенерированные файлы в android/.
+# Любые постоянные правки нативного слоя (манифест, разрешения) держим здесь, после cap sync.
 
 # Next.js
 echo "📦 Сборка Next.js..."
@@ -53,6 +55,13 @@ fi
 echo "🔄 Синхронизация Capacitor..."
 npx cap sync android
 
+# После cap sync тема запуска может снова ссылаться на @drawable/splash — возвращаем белый splash + иконка по центру.
+STYLES="$PROJECT_DIR/android/app/src/main/res/values/styles.xml"
+if [ -f "$PROJECT_DIR/android/app/src/main/res/drawable/splash_white.xml" ] && [ -f "$STYLES" ] && grep -q '@drawable/splash</item>' "$STYLES" && ! grep -q 'splash_white' "$STYLES"; then
+  echo "🔧 Восстанавливаю @drawable/splash_white для экрана запуска…"
+  sed -i.bak 's|@drawable/splash</item>|@drawable/splash_white</item>|' "$STYLES" && rm -f "${STYLES}.bak"
+fi
+
 # FCM: google-services.json должен лежать в android/app (Gradle подключает плагин только оттуда).
 if [ -f "$PROJECT_DIR/google-services.json" ]; then
   cp "$PROJECT_DIR/google-services.json" "$PROJECT_DIR/android/app/google-services.json"
@@ -62,13 +71,29 @@ elif [ ! -f "$PROJECT_DIR/android/app/google-services.json" ]; then
 fi
 
 # Патчим манифест после cap sync: добавляем нужные permissions, если их ещё нет.
+# READ_MEDIA_* / READ_EXTERNAL_STORAGE — для @capacitor-community/media (androidGalleryMode: true в capacitor.config.ts),
+# иначе после «свежего» android/ превью галереи в модалке вложений не заработают.
 MANIFEST="android/app/src/main/AndroidManifest.xml"
 if [ -f "$MANIFEST" ]; then
-  for perm in "RECORD_AUDIO" "MODIFY_AUDIO_SETTINGS" "POST_NOTIFICATIONS"; do
+  for perm in \
+    "RECORD_AUDIO" \
+    "MODIFY_AUDIO_SETTINGS" \
+    "POST_NOTIFICATIONS" \
+    "READ_MEDIA_IMAGES" \
+    "READ_MEDIA_VIDEO" \
+    "READ_EXTERNAL_STORAGE" \
+    "WRITE_EXTERNAL_STORAGE"; do
     if ! grep -q "android.permission.$perm" "$MANIFEST"; then
       echo "🔧 Добавляю $perm в AndroidManifest..."
-      sed -i.bak "s|<uses-permission android:name=\"android.permission.INTERNET\" />|&"$'\n'"    <uses-permission android:name=\"android.permission.$perm\" />|" "$MANIFEST"
-      rm -f "${MANIFEST}.bak"
+      # BSD sed (macOS) не принимает перевод строки в подстановке — вставляем через awk.
+      awk -v p="$perm" '
+        /<uses-permission android:name="android.permission.INTERNET"/ {
+          print
+          print "    <uses-permission android:name=\"android.permission." p "\" />"
+          next
+        }
+        { print }
+      ' "$MANIFEST" > "${MANIFEST}.new" && mv "${MANIFEST}.new" "$MANIFEST"
     fi
   done
 fi

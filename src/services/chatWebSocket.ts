@@ -42,12 +42,26 @@ export interface ChatWebSocketCallbacks {
   onClose?: () => void;
 }
 
+/** Таймаут рукопожатия: при смене Wi‑Fi↔LTE сокет может «висеть» в CONNECTING без onclose. */
+const WS_CONNECT_TIMEOUT_MS = 22_000;
+
 class ChatWebSocketClient {
   private ws: WebSocket | null = null;
   private listeners = new Set<ChatWebSocketListener>();
   private url: string | null = null;
   private callbacks: ChatWebSocketCallbacks = {};
   private pendingRoomJoins = new Map<string, { resolve: () => void; reject: () => void; t: number }>();
+  /** Монотонно растёт при каждой новой попытке — чтобы onclose/таймер старого сокета не трогали новый. */
+  private socketGeneration = 0;
+  /** В браузере setTimeout возвращает number; в Node — Timeout — храним как union. */
+  private connectTimeoutId: ReturnType<typeof setTimeout> | number | null = null;
+
+  private clearConnectTimeout(): void {
+    if (this.connectTimeoutId != null) {
+      clearTimeout(this.connectTimeoutId);
+      this.connectTimeoutId = null;
+    }
+  }
 
   connect(userId: string, accessToken: string, callbacks?: ChatWebSocketCallbacks): void {
     const newUrl = getWebSocketUrl(userId, accessToken);
@@ -55,23 +69,46 @@ class ChatWebSocketClient {
 
     const sameAccount =
       this.url != null && wsUrlUserId(this.url) === userId && wsUrlUserId(newUrl) === userId;
-    // Не обрываем CONNECTING: иначе WebSocketInitializer и ensureConnected по очереди
-    // рвут чужую попытку подключения → бесконечные переподключения.
-    if (this.ws?.readyState === WebSocket.CONNECTING && sameAccount) return;
     // Уже открыт сокет этого пользователя (другой token в URL не трогаем — сервер уже принял сессию).
     if (this.ws?.readyState === WebSocket.OPEN && sameAccount) return;
+    // CONNECTING не отсекаем: после смены сети сокет может «висеть», тогда нужен новый connect() ниже.
 
+    const hadSocket = !!this.ws;
     this.disconnect();
+    // disconnect() инвалидирует onclose старого сокета — вручную сбрасываем UI (isConnected), затем новые callbacks
+    if (hadSocket) {
+      this.callbacks.onClose?.();
+    }
     this.callbacks = callbacks ?? {};
     this.url = newUrl;
-    this.ws = new WebSocket(this.url);
+    this.socketGeneration++;
+    const myGeneration = this.socketGeneration;
+    const socket = new WebSocket(newUrl);
+    this.ws = socket;
 
-    this.ws.onopen = () => {
+    this.clearConnectTimeout();
+    this.connectTimeoutId = window.setTimeout(() => {
+      this.connectTimeoutId = null;
+      if (myGeneration !== this.socketGeneration) return;
+      if (socket.readyState === WebSocket.CONNECTING) {
+        console.warn("[Chat WS] connect timeout, closing stuck socket");
+        try {
+          socket.close();
+        } catch {
+          //
+        }
+      }
+    }, WS_CONNECT_TIMEOUT_MS);
+
+    socket.onopen = () => {
+      if (myGeneration !== this.socketGeneration) return;
+      this.clearConnectTimeout();
       console.log("[Chat WS] connected");
       this.callbacks.onOpen?.();
     };
 
-    this.ws.onmessage = (event: MessageEvent) => {
+    socket.onmessage = (event: MessageEvent) => {
+      if (myGeneration !== this.socketGeneration) return;
       try {
         const message = JSON.parse(event.data) as ChatWebSocketMessage;
         if (message.type === "room_joined") {
@@ -92,11 +129,14 @@ class ChatWebSocketClient {
       }
     };
 
-    this.ws.onerror = (event) => {
+    socket.onerror = (event) => {
+      if (myGeneration !== this.socketGeneration) return;
       console.error("[Chat WS] error", event);
     };
 
-    this.ws.onclose = () => {
+    socket.onclose = () => {
+      if (myGeneration !== this.socketGeneration) return;
+      this.clearConnectTimeout();
       console.log("[Chat WS] closed");
       this.ws = null;
       this.url = null;
@@ -105,8 +145,14 @@ class ChatWebSocketClient {
   }
 
   disconnect(): void {
+    this.clearConnectTimeout();
     if (this.ws) {
-      this.ws.close();
+      this.socketGeneration++;
+      try {
+        this.ws.close();
+      } catch {
+        //
+      }
       this.ws = null;
       this.url = null;
     }

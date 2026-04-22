@@ -10,6 +10,7 @@ import { useAuthStore } from "@/stores/authStore";
 import type { ChatMessageFile } from "@/stores/chatStore";
 import {
   loadPeerChatMediaItems,
+  loadRoomChatMediaItems,
   type PeerMediaItem,
   type PeerMediaKind,
 } from "@/lib/peerChatMedia";
@@ -330,7 +331,15 @@ function DateDivider({ label }: { label: string }) {
   );
 }
 
-export function PeerChatMediaGallery({ peerUserId }: { peerUserId: string }) {
+export function PeerChatMediaGallery({
+  peerUserId,
+  roomId,
+}: {
+  /** Личный чат: вложения по собеседнику. */
+  peerUserId?: string;
+  /** Группа: вложения по `room_id`. Задаётся вместо `peerUserId`. */
+  roomId?: string | null;
+}) {
   const { user } = useAuthStore();
   const [activeTab, setActiveTab] = useState<PeerMediaKind>("image");
   const [loading, setLoading] = useState(true);
@@ -338,8 +347,15 @@ export function PeerChatMediaGallery({ peerUserId }: { peerUserId: string }) {
   const [noRoom, setNoRoom] = useState(false);
   const [items, setItems] = useState<PeerMediaItem[]>([]);
 
+  const groupRoomId = roomId?.trim() ?? "";
+  const peerId = peerUserId?.trim() ?? "";
+
   useEffect(() => {
-    if (!user?.id || !peerUserId) {
+    if (!user?.id) {
+      setLoading(false);
+      return;
+    }
+    if (!groupRoomId && !peerId) {
       setLoading(false);
       return;
     }
@@ -364,15 +380,27 @@ export function PeerChatMediaGallery({ peerUserId }: { peerUserId: string }) {
         return;
       }
       try {
-        const { roomId, items: list } = await loadPeerChatMediaItems(
-          tokens.access_token,
-          user.id,
-          peerUserId,
-          keys.private_key,
-        );
-        if (cancelled) return;
-        setNoRoom(!roomId);
-        setItems(list);
+        if (groupRoomId) {
+          const { roomId: resolved, items: list } = await loadRoomChatMediaItems(
+            tokens.access_token,
+            user.id,
+            groupRoomId,
+            keys.private_key,
+          );
+          if (cancelled) return;
+          setNoRoom(!resolved);
+          setItems(list);
+        } else {
+          const { roomId: resolved, items: list } = await loadPeerChatMediaItems(
+            tokens.access_token,
+            user.id,
+            peerId,
+            keys.private_key,
+          );
+          if (cancelled) return;
+          setNoRoom(!resolved);
+          setItems(list);
+        }
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : "Не удалось загрузить вложения");
       } finally {
@@ -382,7 +410,7 @@ export function PeerChatMediaGallery({ peerUserId }: { peerUserId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [user?.id, peerUserId]);
+  }, [user?.id, peerId, groupRoomId]);
 
   const byKind = useMemo(() => {
     const m: Record<PeerMediaKind, PeerMediaItem[]> = { image: [], video: [], audio: [], file: [] };
@@ -411,7 +439,9 @@ export function PeerChatMediaGallery({ peerUserId }: { peerUserId: string }) {
   if (noRoom) {
     return (
       <p className="mt-6 text-sm text-muted-foreground">
-        Общего чата с этим пользователем пока нет — медиа из переписки появятся здесь после начала диалога.
+        {groupRoomId
+          ? "Комната не найдена или у вас нет к ней доступа — медиа недоступны."
+          : "Общего чата с этим пользователем пока нет — медиа из переписки появятся здесь после начала диалога."}
       </p>
     );
   }
@@ -420,7 +450,9 @@ export function PeerChatMediaGallery({ peerUserId }: { peerUserId: string }) {
     <div className="mt-6">
       <h3 className="text-sm font-semibold text-foreground">Медиа из чата</h3>
       <p className="mt-1 text-xs text-muted-foreground">
-        По датам отправки; время у каждого вложения. Видео — по три в ряд; аудио на всю ширину (фиолетовый оттенок — ваши, серый — собеседника).
+        {groupRoomId
+          ? "По датам отправки; время у каждого вложения. Видео — по три в ряд; аудио на всю ширину (фиолетовый — ваши сообщения, серый — других участников)."
+          : "По датам отправки; время у каждого вложения. Видео — по три в ряд; аудио на всю ширину (фиолетовый оттенок — ваши, серый — собеседника)."}
       </p>
 
       <div className="mt-3 flex gap-1 overflow-x-auto pb-1 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">

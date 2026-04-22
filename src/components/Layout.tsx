@@ -5,27 +5,31 @@ import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
 import { ArrowLeft, Loader2 } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
+import { useChatStore } from "@/stores/chatStore";
 import { useWebSocketStore } from "@/stores/websocketStore";
 import { WebSocketInitializer } from "@/components/WebSocketInitializer";
 
 export function Layout({ children }: { children: React.ReactNode }) {
   const { user } = useAuthStore();
+  const isFetchingChatList = useChatStore((s) => s.isFetchingChatList);
   const isSocketConnected = useWebSocketStore((s) => s.isConnected);
   const pathname = usePathname();
   const router = useRouter();
   const isChatsListPage = pathname === "/" || pathname === "";
+  const isProfilePage = pathname === "/profile" || pathname === "/profile/";
   const showBack =
     pathname === "/profile" ||
     pathname === "/profile/" ||
     pathname === "/chat" ||
     pathname === "/chat/" ||
+    pathname === "/chat/group" ||
+    pathname.startsWith("/chat/group/") ||
     pathname === "/users/user" ||
     pathname === "/users/user/";
-  const hideTopBar =
-    pathname === "/chat" ||
-    pathname === "/chat/" ||
-    pathname === "/profile" ||
-    pathname === "/profile/";
+  /** Скрываем только чат (полноэкранная нить). Профиль — с шапкой как у экрана собеседника. */
+  const hideTopBar = pathname === "/chat" || pathname === "/chat/";
+  /** Не даём main скроллиться: иначе при фокусе в поле ввода клавиатура прокручивает main и строка ввода «улетает» вверх. */
+  const chatMainNoScroll = hideTopBar;
 
   return (
     <div className="flex flex-col h-full bg-background">
@@ -49,15 +53,26 @@ export function Layout({ children }: { children: React.ReactNode }) {
                   className="flex min-w-0 items-center gap-2 font-semibold text-foreground"
                   aria-live="polite"
                   aria-busy="true"
+                  title="Список чатов может быть неактуален до подключения"
                 >
                   <span className="truncate">Соединение</span>
+                  <Loader2 className="h-5 w-5 shrink-0 animate-spin text-primary" aria-hidden />
+                </span>
+              ) : isChatsListPage && user && isSocketConnected && isFetchingChatList ? (
+                <span
+                  className="flex min-w-0 items-center gap-2 font-semibold text-foreground"
+                  aria-live="polite"
+                  aria-busy="true"
+                  title="Загружается актуальный список чатов с сервера"
+                >
+                  <span className="truncate">Обновление</span>
                   <Loader2 className="h-5 w-5 shrink-0 animate-spin text-primary" aria-hidden />
                 </span>
               ) : (
                 <span className="font-semibold text-foreground truncate">Kindred</span>
               )}
             </div>
-            {user && (
+            {user && !isProfilePage ? (
               <Link
                 href="/profile"
                 className="flex items-center gap-2 rounded-full focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 focus:ring-offset-background"
@@ -78,12 +93,16 @@ export function Layout({ children }: { children: React.ReactNode }) {
                   </div>
                 )}
               </Link>
-            )}
+            ) : null}
           </div>
         </header>
       ) : null}
 
-      <main className="flex-1 min-h-0 overflow-auto">{children}</main>
+      <main
+        className={`flex-1 min-h-0 ${chatMainNoScroll ? "overflow-hidden" : "overflow-auto"}`}
+      >
+        {children}
+      </main>
     </div>
   );
 }

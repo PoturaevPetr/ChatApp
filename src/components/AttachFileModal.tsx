@@ -3,9 +3,16 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Capacitor } from "@capacitor/core";
-import { ImagePlus, Loader2, Upload, X } from "lucide-react";
+import { ImagePlus, Loader2, SwitchCamera, Upload, X } from "lucide-react";
 import type { MediaAsset } from "@capacitor-community/media";
-import { fetchRecentGalleryMedias, mediaAssetToSendableFile, mediaThumbSrc } from "@/lib/galleryMedia";
+import {
+  fetchRecentGalleryMedias,
+  mediaAssetToSendableFile,
+  mediaThumbSrc,
+  openAppPhotoSettings,
+  pickImageFromSystemGallery,
+  requestPhotoLibraryAccess,
+} from "@/lib/galleryMedia";
 
 interface AttachFileModalProps {
   isOpen: boolean;
@@ -18,12 +25,28 @@ interface AttachFileModalProps {
 
 const ANIMATION_MS = 300;
 /** Сколько недавних фото запросить при открытии модалки. */
-const GALLERY_INITIAL = 15;
+const GALLERY_INITIAL = 29;
 /** На сколько увеличивать quantity при подгрузке по скроллу. */
-const GALLERY_PAGE = 20;
+const GALLERY_PAGE = 30;
 
 function stopStream(stream: MediaStream | null) {
   stream?.getTracks().forEach((t) => t.stop());
+}
+
+type CameraFacing = "environment" | "user";
+
+async function acquireVideoStream(facing: CameraFacing): Promise<MediaStream> {
+  try {
+    return await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: facing } },
+      audio: false,
+    });
+  } catch {
+    return await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: facing },
+      audio: false,
+    });
+  }
 }
 
 export function AttachFileModal({
@@ -43,10 +66,18 @@ export function AttachFileModal({
   const [lastGalleryQuantity, setLastGalleryQuantity] = useState(0);
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
   const [cameraDenied, setCameraDenied] = useState(false);
+  const [activeFacing, setActiveFacing] = useState<CameraFacing>("environment");
+  const [switchingCamera, setSwitchingCamera] = useState(false);
   const [fullscreenCamera, setFullscreenCamera] = useState(false);
   const [capturing, setCapturing] = useState(false);
   const [pickingId, setPickingId] = useState<string | null>(null);
+  const [galleryPermissionDenied, setGalleryPermissionDenied] = useState(false);
   const [portalReady, setPortalReady] = useState(false);
+
+  const isIosNative = Capacitor.isNativePlatform() && Capacitor.getPlatform() === "ios";
+  const isAndroidNative = Capacitor.isNativePlatform() && Capacitor.getPlatform() === "android";
+  /** iOS (getMedias) и Android (скан альбомов + readdir). */
+  const supportsNativeGallery = isIosNative || isAndroidNative;
 
   const previewVideoRef = useRef<HTMLVideoElement>(null);
   const fullVideoRef = useRef<HTMLVideoElement>(null);
@@ -84,33 +115,41 @@ export function AttachFileModal({
     setGallery([]);
     setGalleryHasMore(false);
     setLastGalleryQuantity(0);
+    setGalleryPermissionDenied(false);
+
+    if (!supportsNativeGallery) {
+      setGalleryLoading(false);
+      return;
+    }
+
     setGalleryLoading(true);
     const qty = GALLERY_INITIAL;
-    void fetchRecentGalleryMedias(qty)
-      .then((items) => {
-        if (cancelled) return;
-        setGallery(items);
-        setLastGalleryQuantity(qty);
-        setGalleryHasMore(items.length === qty);
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setGallery([]);
-          setGalleryHasMore(false);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setGalleryLoading(false);
-      });
+    void (async () => {
+      const { allowed } = await requestPhotoLibraryAccess();
+      if (cancelled) return;
+      if (!allowed) {
+        setGalleryPermissionDenied(true);
+        setGalleryLoading(false);
+        return;
+      }
+      const result = await fetchRecentGalleryMedias(qty);
+      if (cancelled) return;
+      if (result.permissionDenied) setGalleryPermissionDenied(true);
+      setGallery(result.medias);
+      setLastGalleryQuantity(qty);
+      setGalleryHasMore(result.medias.length === qty);
+      setGalleryLoading(false);
+    })();
     return () => {
       cancelled = true;
     };
-  }, [isOpen]);
+  }, [isOpen, supportsNativeGallery]);
 
   const loadMoreGallery = useCallback(() => {
     if (
-      !Capacitor.isNativePlatform() ||
+      !supportsNativeGallery ||
       galleryLoading ||
+      galleryLoadingMore ||
       !galleryHasMore ||
       galleryLoadMoreBusyRef.current
     ) {
@@ -120,10 +159,11 @@ export function AttachFileModal({
     galleryLoadMoreBusyRef.current = true;
     setGalleryLoadingMore(true);
     void fetchRecentGalleryMedias(nextQty)
-      .then((items) => {
-        setGallery(items);
+      .then((result) => {
+        if (result.permissionDenied) setGalleryPermissionDenied(true);
+        setGallery(result.medias);
         setLastGalleryQuantity(nextQty);
-        setGalleryHasMore(items.length === nextQty);
+        setGalleryHasMore(result.medias.length === nextQty);
       })
       .catch(() => {
         setGalleryHasMore(false);
@@ -132,7 +172,7 @@ export function AttachFileModal({
         setGalleryLoadingMore(false);
         galleryLoadMoreBusyRef.current = false;
       });
-  }, [galleryLoading, galleryHasMore, lastGalleryQuantity]);
+  }, [galleryLoading, galleryLoadingMore, galleryHasMore, supportsNativeGallery, lastGalleryQuantity]);
 
   const onGalleryScroll = useCallback(
     (e: React.UIEvent<HTMLDivElement>) => {
@@ -149,27 +189,22 @@ export function AttachFileModal({
     let obtained: MediaStream | null = null;
     (async () => {
       try {
-        obtained = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: "environment" } },
-          audio: false,
-        });
+        obtained = await acquireVideoStream("environment");
         if (!alive) {
           stopStream(obtained);
           return;
         }
+        setActiveFacing("environment");
         setCameraStream(obtained);
         setCameraDenied(false);
       } catch {
-        setCameraDenied(true);
         try {
-          obtained = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: "user" },
-            audio: false,
-          });
+          obtained = await acquireVideoStream("user");
           if (!alive) {
             stopStream(obtained);
             return;
           }
+          setActiveFacing("user");
           setCameraStream(obtained);
           setCameraDenied(false);
         } catch {
@@ -183,6 +218,34 @@ export function AttachFileModal({
       setCameraStream(null);
     };
   }, [isOpen, isVisible, isExiting]);
+
+  const handleSwitchCamera = useCallback(async () => {
+    if (!fullscreenCamera || switchingCamera) return;
+    if (!navigator.mediaDevices?.getUserMedia) return;
+
+    const previousFacing = activeFacing;
+    const nextFacing: CameraFacing = previousFacing === "environment" ? "user" : "environment";
+
+    setSwitchingCamera(true);
+    stopStream(streamRef.current);
+
+    try {
+      const stream = await acquireVideoStream(nextFacing);
+      setCameraStream(stream);
+      setActiveFacing(nextFacing);
+      setCameraDenied(false);
+    } catch {
+      try {
+        const stream = await acquireVideoStream(previousFacing);
+        setCameraStream(stream);
+        setCameraDenied(false);
+      } catch {
+        setCameraDenied(true);
+      }
+    } finally {
+      setSwitchingCamera(false);
+    }
+  }, [fullscreenCamera, switchingCamera, activeFacing]);
 
   useEffect(() => {
     const el = previewVideoRef.current;
@@ -269,6 +332,21 @@ export function AttachFileModal({
     }
   };
 
+  const ANDROID_GALLERY_PICK_ID = "__android_gallery__";
+
+  const handleAndroidGalleryPick = async () => {
+    if (!canAct || pickingId) return;
+    setPickingId(ANDROID_GALLERY_PICK_ID);
+    try {
+      const file = await pickImageFromSystemGallery();
+      if (file) finishAndClose(() => onImageFile(file));
+    } catch (e) {
+      console.warn("[AttachFileModal] Android gallery:", e);
+    } finally {
+      setPickingId(null);
+    }
+  };
+
   if (!isOpen || !portalReady) return null;
 
   return createPortal(
@@ -312,7 +390,7 @@ export function AttachFileModal({
           className="mt-3 max-h-[min(58dvh,480px)] overflow-y-auto overscroll-contain px-3"
           onScroll={onGalleryScroll}
         >
-          {/* Первая строка: камера ровно 25% ширины (1/4 сетки), даже без фото в галерее */}
+          {/* Первая строка: камера 25%; далее превью недавних или (Android) запасной вход в системную галерею. */}
           <div className="mb-1.5 grid grid-cols-4 gap-1.5">
             <button
               type="button"
@@ -329,86 +407,107 @@ export function AttachFileModal({
                 </div>
               )}
             </button>
-            {galleryLoading
-              ? Array.from({ length: 3 }).map((_, i) => (
-                  <div
-                    key={`sk-top-${i}`}
-                    className="aspect-square w-full animate-pulse rounded-xl bg-muted/50"
-                    aria-hidden
-                  />
-                ))
-              : gallery.slice(0, 3).map((asset, i) => {
-                  const src = mediaThumbSrc(asset);
-                  const index = i;
-                  return (
-                    <button
-                      key={asset.identifier}
-                      type="button"
-                      disabled={pickingId !== null}
-                      onClick={() => void handleGalleryPick(asset, index)}
-                      className="relative aspect-square w-full overflow-hidden rounded-xl border border-border/60 focus:outline-none focus:ring-2 focus:ring-primary/45 disabled:opacity-50"
-                      aria-label="Выбрать фото"
-                    >
-                      {src ? (
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img src={src} alt="" className="h-full w-full object-cover" />
-                      ) : (
-                        <div className="flex h-full items-center justify-center bg-muted/40">
-                          <ImagePlus className="h-6 w-6 text-muted-foreground" />
-                        </div>
-                      )}
-                      {pickingId === asset.identifier ? (
-                        <span className="absolute inset-0 flex items-center justify-center bg-black/35">
-                          <Loader2 className="h-7 w-7 animate-spin text-white" />
-                        </span>
-                      ) : null}
-                    </button>
-                  );
-                })}
+            {supportsNativeGallery && galleryLoading ? (
+              Array.from({ length: 3 }).map((_, i) => (
+                <div
+                  key={`sk-top-${i}`}
+                  className="aspect-square w-full animate-pulse rounded-xl bg-muted/50"
+                  aria-hidden
+                />
+              ))
+            ) : isAndroidNative && !galleryLoading && !galleryPermissionDenied && gallery.length === 0 ? (
+              <button
+                type="button"
+                disabled={pickingId !== null}
+                onClick={() => void handleAndroidGalleryPick()}
+                className="relative col-span-3 flex w-full flex-col items-center justify-center gap-1 rounded-xl border border-border/60 bg-muted/25 px-2 py-2 text-center focus:outline-none focus:ring-2 focus:ring-primary/45 disabled:opacity-50"
+                aria-label="Выбрать фото из галереи"
+              >
+                <ImagePlus className="h-7 w-7 text-muted-foreground" />
+                <span className="text-[11px] font-medium text-foreground">Галерея</span>
+                <span className="text-[10px] leading-tight text-muted-foreground">Системный выбор фото</span>
+                {pickingId === ANDROID_GALLERY_PICK_ID ? (
+                  <span className="absolute inset-0 flex items-center justify-center rounded-xl bg-black/35">
+                    <Loader2 className="h-7 w-7 animate-spin text-white" />
+                  </span>
+                ) : null}
+              </button>
+            ) : (
+              gallery.slice(0, 3).map((asset, i) => {
+                const src = mediaThumbSrc(asset);
+                const index = i;
+                return (
+                  <button
+                    key={asset.identifier}
+                    type="button"
+                    disabled={pickingId !== null}
+                    onClick={() => void handleGalleryPick(asset, index)}
+                    className="relative aspect-square w-full overflow-hidden rounded-xl border border-border/60 focus:outline-none focus:ring-2 focus:ring-primary/45 disabled:opacity-50"
+                    aria-label="Выбрать фото"
+                  >
+                    {src ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={src} alt="" className="h-full w-full object-cover" />
+                    ) : (
+                      <div className="flex h-full items-center justify-center bg-muted/40">
+                        <ImagePlus className="h-6 w-6 text-muted-foreground" />
+                      </div>
+                    )}
+                    {pickingId === asset.identifier ? (
+                      <span className="absolute inset-0 flex items-center justify-center bg-black/35">
+                        <Loader2 className="h-7 w-7 animate-spin text-white" />
+                      </span>
+                    ) : null}
+                  </button>
+                );
+              })
+            )}
           </div>
 
-          {Capacitor.isNativePlatform() ? (
+          {supportsNativeGallery ? (
             <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">Недавние фото</p>
           ) : null}
 
-          <div className="grid grid-cols-4 gap-1.5">
-            {galleryLoading
-              ? Array.from({ length: GALLERY_INITIAL - 3 }).map((_, i) => (
-                  <div
-                    key={`sk-${i}`}
-                    className="aspect-square w-full animate-pulse rounded-xl bg-muted/50"
-                    aria-hidden
-                  />
-                ))
-              : gallery.slice(3).map((asset, j) => {
-                  const src = mediaThumbSrc(asset);
-                  const index = 3 + j;
-                  return (
-                    <button
-                      key={asset.identifier}
-                      type="button"
-                      disabled={pickingId !== null}
-                      onClick={() => void handleGalleryPick(asset, index)}
-                      className="relative aspect-square w-full overflow-hidden rounded-xl border border-border/60 focus:outline-none focus:ring-2 focus:ring-primary/45 disabled:opacity-50"
-                      aria-label="Выбрать фото"
-                    >
-                      {src ? (
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img src={src} alt="" className="h-full w-full object-cover" />
-                      ) : (
-                        <div className="flex h-full items-center justify-center bg-muted/40">
-                          <ImagePlus className="h-6 w-6 text-muted-foreground" />
-                        </div>
-                      )}
-                      {pickingId === asset.identifier ? (
-                        <span className="absolute inset-0 flex items-center justify-center bg-black/35">
-                          <Loader2 className="h-7 w-7 animate-spin text-white" />
-                        </span>
-                      ) : null}
-                    </button>
-                  );
-                })}
-          </div>
+          {supportsNativeGallery ? (
+            <div className="grid grid-cols-4 gap-1.5">
+              {galleryLoading
+                ? Array.from({ length: GALLERY_INITIAL - 3 }).map((_, i) => (
+                    <div
+                      key={`sk-${i}`}
+                      className="aspect-square w-full animate-pulse rounded-xl bg-muted/50"
+                      aria-hidden
+                    />
+                  ))
+                : gallery.slice(3).map((asset, j) => {
+                    const src = mediaThumbSrc(asset);
+                    const index = 3 + j;
+                    return (
+                      <button
+                        key={asset.identifier}
+                        type="button"
+                        disabled={pickingId !== null}
+                        onClick={() => void handleGalleryPick(asset, index)}
+                        className="relative aspect-square w-full overflow-hidden rounded-xl border border-border/60 focus:outline-none focus:ring-2 focus:ring-primary/45 disabled:opacity-50"
+                        aria-label="Выбрать фото"
+                      >
+                        {src ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img src={src} alt="" className="h-full w-full object-cover" />
+                        ) : (
+                          <div className="flex h-full items-center justify-center bg-muted/40">
+                            <ImagePlus className="h-6 w-6 text-muted-foreground" />
+                          </div>
+                        )}
+                        {pickingId === asset.identifier ? (
+                          <span className="absolute inset-0 flex items-center justify-center bg-black/35">
+                            <Loader2 className="h-7 w-7 animate-spin text-white" />
+                          </span>
+                        ) : null}
+                      </button>
+                    );
+                  })}
+            </div>
+          ) : null}
 
           {galleryLoadingMore ? (
             <div className="mt-2 flex justify-center py-2" aria-live="polite">
@@ -416,9 +515,26 @@ export function AttachFileModal({
             </div>
           ) : null}
 
-          {Capacitor.isNativePlatform() && !galleryLoading && gallery.length === 0 ? (
+          {supportsNativeGallery && galleryPermissionDenied ? (
+            <div className="mt-3 space-y-2 rounded-xl border border-border/70 bg-muted/20 px-3 py-2.5 text-center">
+              <p className="text-[11px] text-foreground">
+                Нет доступа к фотографиям. Разрешите доступ в настройках, чтобы видеть недавние снимки в этом окне.
+              </p>
+              <button
+                type="button"
+                onClick={() => void openAppPhotoSettings()}
+                className="w-full rounded-lg bg-primary py-2 text-[12px] font-medium text-primary-foreground hover:opacity-95 focus:outline-none focus:ring-2 focus:ring-primary/40"
+              >
+                Открыть настройки
+              </button>
+            </div>
+          ) : null}
+
+          {supportsNativeGallery && !galleryLoading && !galleryPermissionDenied && gallery.length === 0 ? (
             <p className="mt-2 text-center text-[11px] text-muted-foreground">
-              Нет фото в галерее или нет доступа. Выберите файл с диска ниже.
+              {isAndroidNative
+                ? "Не удалось загрузить превью из альбомов. Нажмите «Галерея» выше или загрузите файл с диска ниже."
+                : "Нет недавних фото. Выберите файл с диска ниже."}
             </p>
           ) : null}
 
@@ -443,13 +559,6 @@ export function AttachFileModal({
             <Upload className="h-4 w-4" />
             Загрузить с диска
           </button>
-          <button
-            type="button"
-            onClick={(e) => handleClose(e)}
-            className="w-full py-2.5 text-sm font-medium text-muted-foreground hover:text-foreground focus:outline-none focus:ring-2 focus:ring-primary/25 focus:ring-inset rounded-xl"
-          >
-            Отмена
-          </button>
         </div>
       </div>
 
@@ -459,16 +568,32 @@ export function AttachFileModal({
           role="presentation"
           onClick={(e) => e.stopPropagation()}
         >
-          <div className="flex items-center justify-between px-3 pt-[max(0.75rem,env(safe-area-inset-top))] pb-2">
-            <span className="text-sm font-medium text-white/90">Снимок</span>
-            <button
-              type="button"
-              onClick={closeFullscreen}
-              className="rounded-full p-2 text-white hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-white/40"
-              aria-label="Закрыть"
-            >
-              <X className="h-6 w-6" />
-            </button>
+          <div className="flex items-center justify-between gap-2 px-3 pt-[max(0.75rem,env(safe-area-inset-top))] pb-2">
+            <span className="min-w-0 truncate text-sm font-medium text-white/90">Снимок</span>
+            <div className="flex shrink-0 items-center gap-0.5">
+              <button
+                type="button"
+                onClick={() => void handleSwitchCamera()}
+                disabled={switchingCamera || !cameraStream}
+                className="rounded-full p-2 text-white hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-white/40 disabled:pointer-events-none disabled:opacity-40"
+                aria-label="Переключить камеру"
+                title="Переключить камеру"
+              >
+                {switchingCamera ? (
+                  <Loader2 className="h-6 w-6 animate-spin" aria-hidden />
+                ) : (
+                  <SwitchCamera className="h-6 w-6" aria-hidden />
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={closeFullscreen}
+                className="rounded-full p-2 text-white hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-white/40"
+                aria-label="Закрыть"
+              >
+                <X className="h-6 w-6" />
+              </button>
+            </div>
           </div>
           <div className="relative min-h-0 flex-1">
             <video ref={fullVideoRef} className="h-full w-full object-cover" playsInline muted autoPlay />
