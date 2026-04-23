@@ -1205,9 +1205,10 @@ export function ChatCircleVideo({
           const dur = v.duration;
           const step =
             Number.isFinite(dur) && dur > 0
-              ? Math.min(0.08, Math.max(0.001, dur * 0.02))
-              : 0.001;
-          if (v.currentTime === 0) v.currentTime = step;
+              ? Math.min(0.12, Math.max(0.02, dur * 0.03))
+              : 0.05;
+          // WebKit (в т.ч. iOS): часто нужен небольшой seek, чтобы декодировался кадр для отображения
+          if (v.currentTime < 0.001) v.currentTime = step;
         }
       } catch {
         setMediaReady(true);
@@ -1272,12 +1273,20 @@ export function ChatCircleVideo({
           } ${!uploading && !mediaReady ? "opacity-0" : "opacity-100"}`}
           aria-label={fileName}
           onError={() => setMediaReady(true)}
+          onLoadedData={() => setMediaReady(true)}
+          onCanPlay={() => setMediaReady(true)}
           onClick={
             uploading
               ? undefined
               : () => {
-                  const v = videoRef.current;
-                  if (v && !v.paused) v.pause();
+                  const el = videoRef.current;
+                  if (!el) return;
+                  if (!el.paused) {
+                    el.pause();
+                    return;
+                  }
+                  el.muted = false;
+                  void el.play().catch(() => {});
                 }
           }
         />
@@ -1316,22 +1325,14 @@ export function ChatCircleVideo({
           </span>
         </div>
       ) : !playing && mediaReady ? (
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-          <button
-            type="button"
-            className="pointer-events-auto flex h-14 w-14 items-center justify-center rounded-full bg-background/92 text-primary shadow-lg ring-1 ring-black/10 transition hover:scale-[1.04] active:scale-95 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/55"
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              const v = videoRef.current;
-              if (!v) return;
-              v.muted = false;
-              void v.play();
-            }}
-            aria-label={`Воспроизвести: ${fileName}`}
-          >
-            <Play className="h-7 w-7 translate-x-0.5" fill="currentColor" aria-hidden />
-          </button>
+        <div
+          className="pointer-events-none absolute inset-0 flex items-end justify-center pb-2.5 pt-8"
+          aria-hidden
+        >
+          {/* Небольшая метка: первый кадр виден по всему кругу, не перекрывается большой кнопкой Play */}
+          <div className="rounded-full bg-black/48 px-2.5 py-1.5 text-white shadow-md ring-1 ring-white/15 backdrop-blur-[2px]">
+            <Play className="h-4 w-4 translate-x-[1px]" fill="currentColor" aria-hidden />
+          </div>
         </div>
       ) : null}
       {showTimeBadge ? (

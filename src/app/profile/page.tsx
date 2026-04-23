@@ -1,18 +1,16 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { AuthGuard } from "@/components/AuthGuard";
 import { Layout } from "@/components/Layout";
 import { LogoutConfirmModal } from "@/components/LogoutConfirmModal";
-import { AttachFileModal } from "@/components/AttachFileModal";
 import { useAuthStore } from "@/stores/authStore";
 import { getValidAuthTokens } from "@/lib/validAuthToken";
 import { getChatKeys, getChatKeysForUser, setChatKeys } from "@/lib/secureStorage";
 import { chatAuthApi } from "@/services/chatAuthApi";
 import { LogOut, Loader2, Pencil } from "lucide-react";
 import NextImage from "next/image";
-import { useRef } from "react";
 import { ProfileEditModal } from "@/components/ProfileEditModal";
 import { fileToAvatarDataUrl } from "@/lib/avatarImage";
 
@@ -87,12 +85,11 @@ export default function ProfilePage() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [hasChatKeys, setHasChatKeys] = useState<boolean | null>(null);
   const [showLogoutModal, setShowLogoutModal] = useState(false);
-  const [showAvatarModal, setShowAvatarModal] = useState(false);
   const [showEditProfileModal, setShowEditProfileModal] = useState(false);
   const [isUploadingAvatar, setIsUploadingAvatar] = useState(false);
   const [avatarError, setAvatarError] = useState<string | null>(null);
-  const photoInputRef = useRef<HTMLInputElement | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  /** Без `capture` — открывается галерея / выбор фото. */
+  const avatarGalleryInputRef = useRef<HTMLInputElement | null>(null);
 
   const saveAvatar = async (dataUrl: string) => {
     const tokens = await getValidAuthTokens();
@@ -110,7 +107,6 @@ export default function ProfilePage() {
       if (f.size > 10 * 1024 * 1024) throw new Error("Файл слишком большой (макс 10MB)");
       const dataUrl = await fileToAvatarDataUrl(f);
       await saveAvatar(dataUrl);
-      setShowAvatarModal(false);
     } catch (err) {
       setAvatarError(err instanceof Error ? err.message : "Ошибка загрузки аватара");
     } finally {
@@ -187,11 +183,11 @@ export default function ProfilePage() {
                       type="button"
                       onClick={() => {
                         setAvatarError(null);
-                        setShowAvatarModal(true);
+                        avatarGalleryInputRef.current?.click();
                       }}
                       className="relative w-24 h-24 rounded-full overflow-hidden bg-primary/20 text-primary flex items-center justify-center font-medium text-3xl mb-4 ring-offset-background focus:outline-none focus:ring-2 focus:ring-primary/50 focus:ring-offset-2"
-                      aria-label="Сменить фото"
-                      title="Сменить фото"
+                      aria-label="Выбрать фото из галереи"
+                      title="Выбрать фото из галереи"
                     >
                       {profile?.avatar ?? user.avatar ? (
                         <NextImage
@@ -275,30 +271,8 @@ export default function ProfilePage() {
           }}
         />
 
-        <AttachFileModal
-          isOpen={showAvatarModal}
-          onClose={() => setShowAvatarModal(false)}
-          onTakePhoto={() => photoInputRef.current?.click()}
-          onUploadFile={() => fileInputRef.current?.click()}
-          onImageFile={(file) => void ingestAvatarFile(file)}
-        />
-
         <input
-          ref={photoInputRef}
-          type="file"
-          accept="image/*"
-          capture="environment"
-          className="hidden"
-          onChange={async (e) => {
-            const f = e.target.files?.[0];
-            e.currentTarget.value = "";
-            if (!f) return;
-            await ingestAvatarFile(f);
-          }}
-        />
-
-        <input
-          ref={fileInputRef}
+          ref={avatarGalleryInputRef}
           type="file"
           accept="image/*"
           className="hidden"

@@ -5,7 +5,6 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { MessageCircle, Loader2, UserMinus, Crown, LogOut } from "lucide-react";
 import { AuthGuard } from "@/components/AuthGuard";
 import { Layout } from "@/components/Layout";
-import { AttachFileModal } from "@/components/AttachFileModal";
 import { useAuthStore } from "@/stores/authStore";
 import { useChatStore } from "@/stores/chatStore";
 import { getValidAuthTokens } from "@/lib/validAuthToken";
@@ -61,11 +60,10 @@ function GroupProfileContent() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [leaveModalOpen, setLeaveModalOpen] = useState(false);
   const [isLeaving, setIsLeaving] = useState(false);
-  const [showAvatarModal, setShowAvatarModal] = useState(false);
   const [isUploadingAvatar, setIsUploadingAvatar] = useState(false);
   const [avatarError, setAvatarError] = useState<string | null>(null);
-  const photoInputRef = useRef<HTMLInputElement | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  /** Без `capture` — открывается галерея / выбор фото. */
+  const avatarGalleryInputRef = useRef<HTMLInputElement | null>(null);
 
   const reloadRoom = useCallback(async () => {
     if (!roomId) return;
@@ -192,7 +190,6 @@ function GroupProfileContent() {
       await patchGroupRoom(t.access_token, roomId, { avatar: dataUrl });
       if (user?.id) void loadChats(user.id, { force: true });
       await reloadRoom();
-      setShowAvatarModal(false);
     } catch (err) {
       setAvatarError(err instanceof Error ? err.message : "Не удалось обновить фото группы");
     } finally {
@@ -226,11 +223,11 @@ function GroupProfileContent() {
                       type="button"
                       onClick={() => {
                         setAvatarError(null);
-                        setShowAvatarModal(true);
+                        avatarGalleryInputRef.current?.click();
                       }}
                       className="relative w-24 h-24 rounded-full overflow-hidden bg-primary/20 text-primary flex items-center justify-center font-medium text-3xl mb-4 border border-border/60 ring-offset-background focus:outline-none focus:ring-2 focus:ring-primary/50 focus:ring-offset-2"
-                      aria-label="Сменить фото группы"
-                      title="Сменить фото группы"
+                      aria-label="Выбрать фото из галереи"
+                      title="Выбрать фото из галереи"
                     >
                       {avatar ? (
                         <img src={avatar} alt="" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
@@ -385,30 +382,8 @@ function GroupProfileContent() {
           </div>
         ) : null}
 
-        <AttachFileModal
-          isOpen={showAvatarModal}
-          onClose={() => setShowAvatarModal(false)}
-          onTakePhoto={() => photoInputRef.current?.click()}
-          onUploadFile={() => fileInputRef.current?.click()}
-          onImageFile={(file) => void ingestGroupAvatarFile(file)}
-        />
-
         <input
-          ref={photoInputRef}
-          type="file"
-          accept="image/*"
-          capture="environment"
-          className="hidden"
-          onChange={async (e) => {
-            const f = e.target.files?.[0];
-            e.currentTarget.value = "";
-            if (!f) return;
-            await ingestGroupAvatarFile(f);
-          }}
-        />
-
-        <input
-          ref={fileInputRef}
+          ref={avatarGalleryInputRef}
           type="file"
           accept="image/*"
           className="hidden"

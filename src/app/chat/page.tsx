@@ -64,6 +64,58 @@ function emptyAudioMeterLevels(): number[] {
   return Array.from({ length: AUDIO_METER_BAR_COUNT }, () => 0.08);
 }
 
+/** Подсказка над полем ввода: текст или картинка из буфера (Clipboard API). */
+type ComposerClipboardSuggestion =
+  | { kind: "text"; text: string }
+  | { kind: "image"; file: File };
+
+async function readClipboardSuggestion(): Promise<ComposerClipboardSuggestion | null> {
+  if (typeof navigator === "undefined") return null;
+  if (navigator.clipboard?.read) {
+    try {
+      const items = await navigator.clipboard.read();
+      for (const item of items) {
+        const imageType = item.types.find((t) => t.startsWith("image/"));
+        if (imageType) {
+          const blob = await item.getType(imageType);
+          if (blob.size === 0) continue;
+          const mime = blob.type || imageType;
+          const ext = mime.includes("png")
+            ? "png"
+            : mime.includes("jpeg") || mime.includes("jpg")
+              ? "jpg"
+              : mime.includes("webp")
+                ? "webp"
+                : mime.includes("gif")
+                  ? "gif"
+                  : "png";
+          const file = new File([blob], `clipboard-${Date.now()}.${ext}`, { type: mime });
+          return { kind: "image", file };
+        }
+      }
+      for (const item of items) {
+        if (!item.types.includes("text/plain")) continue;
+        const blob = await item.getType("text/plain");
+        const text = await blob.text();
+        if (text.length === 0) continue;
+        return { kind: "text", text };
+      }
+    } catch {
+      /* fall through to readText */
+    }
+  }
+  if (navigator.clipboard?.readText) {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text.length === 0) return null;
+      return { kind: "text", text };
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 function getAudioContextCtor(): (typeof AudioContext) | null {
   if (typeof window === "undefined") return null;
   const w = window as unknown as { webkitAudioContext?: typeof AudioContext };
@@ -300,6 +352,9 @@ function ChatThreadContent() {
   const [replyingTo, setReplyingTo] = useState<ReplyTo | null>(null);
   const [attachModalOpen, setAttachModalOpen] = useState(false);
   const [emojiKeyboardOpen, setEmojiKeyboardOpen] = useState(false);
+  /** Показывать подсказку из буфера только при фокусе и пустом поле (см. clipboardSuggestion). */
+  const [composerInputFocused, setComposerInputFocused] = useState(false);
+  const [clipboardSuggestion, setClipboardSuggestion] = useState<ComposerClipboardSuggestion | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   /** Видео: warmup — камера подключается, кадр ещё не готов; recording — идёт MediaRecorder. */
   const [videoRecordPhase, setVideoRecordPhase] = useState<null | "warmup" | "recording">(null);
@@ -328,6 +383,8 @@ function ChatThreadContent() {
   const userTouchedScrollRef = useRef(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const composerInputFocusedRef = useRef(false);
+  const inputTrimRef = useRef("");
   const typingStopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastTypingSentAtRef = useRef(0);
   const emojiKeyboardOpenRef = useRef(false);
@@ -336,6 +393,8 @@ function ChatThreadContent() {
   const deleteModalOpenRef = useRef(false);
   const isDeletingChatRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  /** Выбор только изображений с диска/галереи (как для аватара группы), без capture — открывается системный выбор фото. */
+  const imagePickerInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -1007,6 +1066,36 @@ function ChatThreadContent() {
     [activeRoomId, user?.id, submitMessageReaction],
   );
 
+  inputTrimRef.current = input.trim();
+
+  useEffect(() => {
+    composerInputFocusedRef.current = composerInputFocused;
+  }, [composerInputFocused]);
+
+  useEffect(() => {
+    if (!composerInputFocused) {
+      setClipboardSuggestion(null);
+      return;
+    }
+    if (input.trim() !== "") {
+      setClipboardSuggestion(null);
+      return;
+    }
+    if (isRecording || videoRecordPhase !== null) {
+      setClipboardSuggestion(null);
+      return;
+    }
+    let cancelled = false;
+    void readClipboardSuggestion().then((s) => {
+      if (cancelled || !composerInputFocusedRef.current) return;
+      if (inputTrimRef.current !== "") return;
+      setClipboardSuggestion(s);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [composerInputFocused, input, isRecording, videoRecordPhase]);
+
   if (!user || !threadPeerId) {
     return (
       <AuthGuard requireAuth>
@@ -1072,6 +1161,7 @@ function ChatThreadContent() {
   const clearFileInputs = () => {
     if (fileInputRef.current) fileInputRef.current.value = "";
     if (cameraInputRef.current) cameraInputRef.current.value = "";
+    if (imagePickerInputRef.current) imagePickerInputRef.current.value = "";
   };
 
   const clearRecordHoldTimer = () => {
@@ -2032,6 +2122,37 @@ function ChatThreadContent() {
                 </div>
               ) : null}
 
+              {composerInputFocused &&
+              !input.trim() &&
+              !isRecording &&
+              videoRecordPhase === null &&
+              clipboardSuggestion ? (
+                <button
+                  type="button"
+                  onPointerDown={(e) => e.preventDefault()}
+                  onClick={() => {
+                    if (clipboardSuggestion.kind === "text") {
+                      setInput(clipboardSuggestion.text);
+                      queueMicrotask(() => inputRef.current?.focus());
+                      return;
+                    }
+                    ingestFileForSend(clipboardSuggestion.file);
+                  }}
+                  className="mb-2 flex w-full min-w-0 items-center rounded-lg border border-border bg-muted/70 px-3 py-2 text-left text-sm text-foreground transition hover:bg-muted focus:outline-none focus:ring-2 focus:ring-primary/30 dark:bg-muted/50 dark:hover:bg-muted/65"
+                  aria-label={
+                    clipboardSuggestion.kind === "text"
+                      ? "Вставить текст из буфера обмена"
+                      : "Отправить изображение из буфера обмена"
+                  }
+                >
+                  {clipboardSuggestion.kind === "text" ? (
+                    <span className="min-w-0 flex-1 truncate">{clipboardSuggestion.text}</span>
+                  ) : (
+                    <span className="min-w-0 flex-1 truncate text-muted-foreground">Изображение</span>
+                  )}
+                </button>
+              ) : null}
+
               <div className="">
                 <form
                   onSubmit={(e) => {
@@ -2045,6 +2166,14 @@ function ChatThreadContent() {
                     type="file"
                     className="hidden"
                     accept="*/*"
+                    onChange={handleFileSelect}
+                    aria-hidden
+                  />
+                  <input
+                    ref={imagePickerInputRef}
+                    type="file"
+                    className="hidden"
+                    accept="image/*"
                     onChange={handleFileSelect}
                     aria-hidden
                   />
@@ -2063,6 +2192,7 @@ function ChatThreadContent() {
                     onTakePhoto={() => cameraInputRef.current?.click()}
                     onUploadFile={() => fileInputRef.current?.click()}
                     onImageFile={ingestFileForSend}
+                    onChooseImageFromDevice={() => imagePickerInputRef.current?.click()}
                   />
                   <div className="flex min-w-0 flex-1 items-center gap-0.5 rounded-3xl border border-border bg-background py-1 pl-1.5 pr-1.5 focus-within:ring-2 focus-within:ring-primary/30">
                     <button
@@ -2094,10 +2224,14 @@ function ChatThreadContent() {
                         if (v.trim()) bumpComposerTyping();
                         else flushTypingToServer();
                       }}
-                      onBlur={() => flushTypingToServer()}
+                      onBlur={() => {
+                        flushTypingToServer();
+                        setComposerInputFocused(false);
+                      }}
                       onFocus={() => {
                         setEmojiKeyboardOpen(false);
                         resetAndroidDocumentScroll();
+                        setComposerInputFocused(true);
                       }}
                       placeholder="Сообщение..."
                       className="min-w-0 flex-1 border-0 bg-transparent py-2 pl-2 pr-2 text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-0"

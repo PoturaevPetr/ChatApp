@@ -283,6 +283,15 @@ function persistActiveThreadSnapshot(
   );
 }
 
+/** После смены статуса прочтения: лента (thread cache) и список чатов (chats cache), иначе cold start теряет галочки. */
+function persistThreadAndChatsListCache(get: () => ChatState): void {
+  queueMicrotask(() => {
+    persistActiveThreadSnapshot(get, false);
+    const uid = get().chatsLoadedForUserId?.trim();
+    if (uid) void writeChatsListCache(uid, get().chats as unknown[]);
+  });
+}
+
 function mergeOneUserReaction(
   prev: MessageReaction[] | undefined,
   userId: string,
@@ -1570,11 +1579,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   markAsRead: (currentUserId: string, otherUserId: string) => {
     markThreadAsRead(currentUserId, otherUserId);
+    const me = currentUserId.toLowerCase();
+    const otherLower = otherUserId.toLowerCase();
+    const isGroup = isGroupThreadPeerId(otherUserId);
     set((s) => ({
-      activeChatMessages: s.activeChatMessages.map((m) =>
-        m.senderId === otherUserId ? { ...m, status: "read" as const } : m
-      ),
+      activeChatMessages: s.activeChatMessages.map((m) => {
+        if (isGroup) {
+          return !m.isOwn ? { ...m, status: "read" as const } : m;
+        }
+        return String(m.senderId).toLowerCase() === otherLower ? { ...m, status: "read" as const } : m;
+      }),
+      chats: s.chats.map((c) => {
+        if (String(c.otherUser.id).toLowerCase() !== otherLower) return c;
+        const lm = c.lastMessage;
+        if (!lm) return { ...c, unreadCount: 0 };
+        const fromSomeoneElse = String(lm.senderId).toLowerCase() !== me;
+        const nextLm =
+          fromSomeoneElse && lm.status !== "read" ? { ...lm, status: "read" as const } : lm;
+        return { ...c, lastMessage: nextLm, unreadCount: 0 };
+      }),
     }));
+    persistThreadAndChatsListCache(get);
   },
 
   removeChatByRoomId: (roomId: string) => {
@@ -1607,7 +1632,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({
       activeChatMessages: list.map((msg, i) => (i === idx ? updated : msg)),
     });
-    queueMicrotask(() => persistActiveThreadSnapshot(get, false));
     const chats = get().chats;
     const chatIdx = chats.findIndex((c) => c.lastMessage?.id === prev.id);
     if (chatIdx >= 0) {
@@ -1624,6 +1648,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }),
       });
     }
+    persistThreadAndChatsListCache(get);
   },
 
   markOwnMessageReadByPeer: (messageId: string) => {
@@ -1641,6 +1666,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         return c;
       }),
     }));
+    persistThreadAndChatsListCache(get);
   },
 
   removeMessageFromActiveChat: (messageId: string) => {

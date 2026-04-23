@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Capacitor } from "@capacitor/core";
-import { ImagePlus, Loader2, SwitchCamera, Upload, X } from "lucide-react";
+import { FileUp, ImagePlus, Loader2, SwitchCamera, Upload, X } from "lucide-react";
 import type { MediaAsset } from "@capacitor-community/media";
 import {
   fetchRecentGalleryMedias,
@@ -21,6 +21,14 @@ interface AttachFileModalProps {
   onTakePhoto: () => void;
   onUploadFile: () => void;
   onImageFile: (file: File) => void;
+  /**
+   * Если задан — показывается отдельный блок «Изображение» (выбор только картинок, как аватар группы).
+   * Блок «Файл» открывает onUploadFile (любые типы).
+   */
+  onChooseImageFromDevice?: () => void;
+  /** Заголовок модалки (по умолчанию — общий текст вложения). */
+  modalTitle?: string;
+  modalSubtitle?: string;
 }
 
 const ANIMATION_MS = 300;
@@ -55,6 +63,9 @@ export function AttachFileModal({
   onTakePhoto,
   onUploadFile,
   onImageFile,
+  onChooseImageFromDevice,
+  modalTitle,
+  modalSubtitle,
 }: AttachFileModalProps) {
   const [isVisible, setIsVisible] = useState(false);
   const [isExiting, setIsExiting] = useState(false);
@@ -174,11 +185,12 @@ export function AttachFileModal({
       });
   }, [galleryLoading, galleryLoadingMore, galleryHasMore, supportsNativeGallery, lastGalleryQuantity]);
 
-  const onGalleryScroll = useCallback(
+  /** Подгрузка недавних фото при прокрутке ряда (горизонтально). */
+  const onGalleryRowScroll = useCallback(
     (e: React.UIEvent<HTMLDivElement>) => {
       const el = e.currentTarget;
-      const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 140;
-      if (nearBottom) loadMoreGallery();
+      const nearEndX = el.scrollWidth - el.scrollLeft - el.clientWidth < 120;
+      if (nearEndX) loadMoreGallery();
     },
     [loadMoreGallery],
   );
@@ -380,185 +392,194 @@ export function AttachFileModal({
           <span className="h-1 w-10 rounded-full bg-muted-foreground/30" aria-hidden />
         </div>
         <h2 id="attach-modal-title" className="px-4 text-center text-lg font-semibold text-foreground">
-          Прикрепить файл
+          {modalTitle ?? "Прикрепить"}
         </h2>
-        <p className="mt-0.5 px-4 text-center text-xs text-muted-foreground">
-          Камера · недавние фото · или файл с диска
-        </p>
+        {modalSubtitle != null && modalSubtitle !== "" ? (
+          <p className="mt-0.5 px-4 text-center text-xs text-muted-foreground">{modalSubtitle}</p>
+        ) : null}
 
-        <div
-          className="mt-3 max-h-[min(58dvh,480px)] overflow-y-auto overscroll-contain px-3"
-          onScroll={onGalleryScroll}
-        >
-          {/* Первая строка: камера 25%; далее превью недавних или (Android) запасной вход в системную галерею. */}
-          <div className="mb-1.5 grid grid-cols-4 gap-1.5">
-            <button
-              type="button"
-              onClick={openPreviewTap}
-              className="relative aspect-square w-full overflow-hidden rounded-xl bg-black focus:outline-none focus:ring-2 focus:ring-primary/50"
-              aria-label={cameraDenied ? "Открыть камеру" : "Снимок на весь экран"}
-            >
-              {cameraStream && !cameraDenied ? (
-                <video ref={previewVideoRef} className="h-full w-full object-cover" playsInline muted autoPlay />
-              ) : (
-                <div className="flex h-full w-full flex-col items-center justify-center gap-1 bg-muted/40 p-0.5 text-[9px] leading-tight text-muted-foreground">
-                  <ImagePlus className="h-6 w-6 shrink-0 opacity-60" />
-                  <span className="px-0.5 text-center">Камера</span>
-                </div>
-              )}
-            </button>
-            {supportsNativeGallery && galleryLoading ? (
-              Array.from({ length: 3 }).map((_, i) => (
-                <div
-                  key={`sk-top-${i}`}
-                  className="aspect-square w-full animate-pulse rounded-xl bg-muted/50"
-                  aria-hidden
-                />
-              ))
-            ) : isAndroidNative && !galleryLoading && !galleryPermissionDenied && gallery.length === 0 ? (
+        <div className="mt-2 px-3">
+          {/* Один ряд: камера | фото | файл — одинаковые квадраты (или камера | диск). Галерея — ниже на всю ширину. */}
+          <div
+            className={`grid w-full gap-2 pb-2 pt-0.5 ${
+              onChooseImageFromDevice
+                ? "grid-cols-3 [grid-template-columns:minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)]"
+                : "grid-cols-2 [grid-template-columns:minmax(0,1fr)_minmax(0,1fr)]"
+            }`}
+          >
+            <div className="min-w-0 flex items-center justify-center">
               <button
                 type="button"
-                disabled={pickingId !== null}
-                onClick={() => void handleAndroidGalleryPick()}
-                className="relative col-span-3 flex w-full flex-col items-center justify-center gap-1 rounded-xl border border-border/60 bg-muted/25 px-2 py-2 text-center focus:outline-none focus:ring-2 focus:ring-primary/45 disabled:opacity-50"
-                aria-label="Выбрать фото из галереи"
+                onClick={openPreviewTap}
+                className="relative aspect-square w-full max-w-[min(100%,9.5rem)] overflow-hidden rounded-xl bg-black focus:outline-none focus:ring-2 focus:ring-primary/50"
+                aria-label={cameraDenied ? "Открыть камеру" : "Снимок на весь экран"}
               >
-                <ImagePlus className="h-7 w-7 text-muted-foreground" />
-                <span className="text-[11px] font-medium text-foreground">Галерея</span>
-                <span className="text-[10px] leading-tight text-muted-foreground">Системный выбор фото</span>
-                {pickingId === ANDROID_GALLERY_PICK_ID ? (
-                  <span className="absolute inset-0 flex items-center justify-center rounded-xl bg-black/35">
-                    <Loader2 className="h-7 w-7 animate-spin text-white" />
-                  </span>
-                ) : null}
+                {cameraStream && !cameraDenied ? (
+                  <video ref={previewVideoRef} className="h-full w-full object-cover" playsInline muted autoPlay />
+                ) : (
+                  <div className="flex h-full w-full flex-col items-center justify-center gap-0.5 bg-muted/40 p-0.5 text-[8px] leading-tight text-muted-foreground">
+                    <ImagePlus className="h-5 w-5 shrink-0 opacity-60" />
+                    <span className="px-0.5 text-center">Камера</span>
+                  </div>
+                )}
               </button>
-            ) : (
-              gallery.slice(0, 3).map((asset, i) => {
-                const src = mediaThumbSrc(asset);
-                const index = i;
-                return (
+            </div>
+
+            {onChooseImageFromDevice ? (
+              <>
+                <div className="min-w-0 flex items-center justify-center">
                   <button
-                    key={asset.identifier}
                     type="button"
-                    disabled={pickingId !== null}
-                    onClick={() => void handleGalleryPick(asset, index)}
-                    className="relative aspect-square w-full overflow-hidden rounded-xl border border-border/60 focus:outline-none focus:ring-2 focus:ring-primary/45 disabled:opacity-50"
-                    aria-label="Выбрать фото"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      if (!isVisible || !canAct) return;
+                      finishAndClose(() => onChooseImageFromDevice());
+                    }}
+                    className="relative flex aspect-square w-full max-w-[min(100%,9.5rem)] flex-col items-center justify-center gap-0.5 overflow-hidden rounded-xl border border-border bg-muted/20 px-1 py-1 text-[10px] font-medium text-foreground hover:bg-muted/40 focus:outline-none focus:ring-2 focus:ring-primary/35 active:scale-[0.98]"
                   >
-                    {src ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img src={src} alt="" className="h-full w-full object-cover" />
-                    ) : (
-                      <div className="flex h-full items-center justify-center bg-muted/40">
-                        <ImagePlus className="h-6 w-6 text-muted-foreground" />
-                      </div>
-                    )}
-                    {pickingId === asset.identifier ? (
-                      <span className="absolute inset-0 flex items-center justify-center bg-black/35">
-                        <Loader2 className="h-7 w-7 animate-spin text-white" />
-                      </span>
-                    ) : null}
+                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary/12 text-primary">
+                      <ImagePlus className="h-3.5 w-3.5" aria-hidden />
+                    </span>
+                    Фото
                   </button>
-                );
-              })
+                </div>
+                <div className="min-w-0 flex items-center justify-center">
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      if (!isVisible || !canAct) return;
+                      finishAndClose(() => onUploadFile());
+                    }}
+                    className="relative flex aspect-square w-full max-w-[min(100%,9.5rem)] flex-col items-center justify-center gap-0.5 overflow-hidden rounded-xl border border-border bg-muted/20 px-1 py-1 text-[10px] font-medium text-foreground hover:bg-muted/40 focus:outline-none focus:ring-2 focus:ring-primary/35 active:scale-[0.98]"
+                  >
+                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground">
+                      <FileUp className="h-3.5 w-3.5" aria-hidden />
+                    </span>
+                    Файл
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="min-w-0 flex items-center justify-center">
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (!isVisible || !canAct) return;
+                    finishAndClose(() => onUploadFile());
+                  }}
+                  className="relative flex aspect-square w-full max-w-[min(100%,9.5rem)] flex-col items-center justify-center gap-1 overflow-hidden rounded-xl border border-border bg-muted/25 px-2 py-2 text-[10px] font-medium text-foreground hover:bg-muted/45 focus:outline-none focus:ring-2 focus:ring-primary/35"
+                >
+                  <Upload className="h-5 w-5 shrink-0 text-muted-foreground" aria-hidden />
+                  Диск
+                </button>
+              </div>
             )}
           </div>
 
           {supportsNativeGallery ? (
-            <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">Недавние фото</p>
-          ) : null}
+            <div className="pb-2">
+              <div
+                className="flex max-h-[min(9.5rem,32vw)] min-h-[3.25rem] w-full gap-1 overflow-x-auto overflow-y-hidden scroll-smooth overscroll-x-contain [-webkit-overflow-scrolling:touch] py-0.5"
+                onScroll={onGalleryRowScroll}
+              >
+                {galleryLoading
+                  ? Array.from({ length: 3 }).map((_, i) => (
+                      <div
+                        key={`sk-${i}`}
+                        className="h-14 w-14 shrink-0 animate-pulse rounded-lg bg-muted/50"
+                        aria-hidden
+                      />
+                    ))
+                  : null}
 
-          {supportsNativeGallery ? (
-            <div className="grid grid-cols-4 gap-1.5">
-              {galleryLoading
-                ? Array.from({ length: GALLERY_INITIAL - 3 }).map((_, i) => (
-                    <div
-                      key={`sk-${i}`}
-                      className="aspect-square w-full animate-pulse rounded-xl bg-muted/50"
-                      aria-hidden
-                    />
-                  ))
-                : gallery.slice(3).map((asset, j) => {
-                    const src = mediaThumbSrc(asset);
-                    const index = 3 + j;
-                    return (
-                      <button
-                        key={asset.identifier}
-                        type="button"
-                        disabled={pickingId !== null}
-                        onClick={() => void handleGalleryPick(asset, index)}
-                        className="relative aspect-square w-full overflow-hidden rounded-xl border border-border/60 focus:outline-none focus:ring-2 focus:ring-primary/45 disabled:opacity-50"
-                        aria-label="Выбрать фото"
-                      >
-                        {src ? (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img src={src} alt="" className="h-full w-full object-cover" />
-                        ) : (
-                          <div className="flex h-full items-center justify-center bg-muted/40">
-                            <ImagePlus className="h-6 w-6 text-muted-foreground" />
-                          </div>
-                        )}
-                        {pickingId === asset.identifier ? (
-                          <span className="absolute inset-0 flex items-center justify-center bg-black/35">
-                            <Loader2 className="h-7 w-7 animate-spin text-white" />
-                          </span>
-                        ) : null}
-                      </button>
-                    );
-                  })}
+                {!galleryLoading && isAndroidNative && !galleryPermissionDenied && gallery.length === 0 ? (
+                  <button
+                    type="button"
+                    disabled={pickingId !== null}
+                    onClick={() => void handleAndroidGalleryPick()}
+                    className="relative flex h-14 min-w-[4.5rem] shrink-0 flex-col items-center justify-center gap-0.5 rounded-lg border border-border/60 bg-muted/25 px-1 text-center focus:outline-none focus:ring-2 focus:ring-primary/45 disabled:opacity-50"
+                    aria-label="Выбрать фото из галереи"
+                  >
+                    <ImagePlus className="h-5 w-5 text-muted-foreground" />
+                    <span className="text-[9px] font-medium leading-tight text-foreground">Галерея</span>
+                    {pickingId === ANDROID_GALLERY_PICK_ID ? (
+                      <span className="absolute inset-0 flex items-center justify-center rounded-lg bg-black/35">
+                        <Loader2 className="h-5 w-5 animate-spin text-white" />
+                      </span>
+                    ) : null}
+                  </button>
+                ) : null}
+
+                {!galleryLoading && gallery.length > 0
+                  ? gallery.map((asset, index) => {
+                      const src = mediaThumbSrc(asset);
+                      return (
+                        <button
+                          key={asset.identifier}
+                          type="button"
+                          disabled={pickingId !== null}
+                          onClick={() => void handleGalleryPick(asset, index)}
+                          className="relative h-14 w-14 shrink-0 overflow-hidden rounded-lg border border-border/60 focus:outline-none focus:ring-2 focus:ring-primary/45 disabled:opacity-50"
+                          aria-label="Выбрать фото"
+                        >
+                          {src ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img src={src} alt="" className="h-full w-full object-cover" />
+                          ) : (
+                            <div className="flex h-full items-center justify-center bg-muted/40">
+                              <ImagePlus className="h-4 w-4 text-muted-foreground" />
+                            </div>
+                          )}
+                          {pickingId === asset.identifier ? (
+                            <span className="absolute inset-0 flex items-center justify-center bg-black/35">
+                              <Loader2 className="h-5 w-5 animate-spin text-white" />
+                            </span>
+                          ) : null}
+                        </button>
+                      );
+                    })
+                  : null}
+              </div>
             </div>
           ) : null}
 
           {galleryLoadingMore ? (
-            <div className="mt-2 flex justify-center py-2" aria-live="polite">
-              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" aria-hidden />
+            <div className="flex justify-center py-1.5" aria-live="polite">
+              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" aria-hidden />
             </div>
           ) : null}
 
           {supportsNativeGallery && galleryPermissionDenied ? (
-            <div className="mt-3 space-y-2 rounded-xl border border-border/70 bg-muted/20 px-3 py-2.5 text-center">
-              <p className="text-[11px] text-foreground">
-                Нет доступа к фотографиям. Разрешите доступ в настройках, чтобы видеть недавние снимки в этом окне.
-              </p>
+            <div className="mt-2 space-y-2 rounded-xl border border-border/70 bg-muted/20 px-3 py-2.5 text-center">
+              <p className="text-xs text-foreground">Нужен доступ к фото — включите в настройках.</p>
               <button
                 type="button"
                 onClick={() => void openAppPhotoSettings()}
-                className="w-full rounded-lg bg-primary py-2 text-[12px] font-medium text-primary-foreground hover:opacity-95 focus:outline-none focus:ring-2 focus:ring-primary/40"
+                className="w-full rounded-lg bg-primary py-2 text-xs font-medium text-primary-foreground hover:opacity-95 focus:outline-none focus:ring-2 focus:ring-primary/40"
               >
-                Открыть настройки
+                Настройки
               </button>
             </div>
           ) : null}
 
           {supportsNativeGallery && !galleryLoading && !galleryPermissionDenied && gallery.length === 0 ? (
-            <p className="mt-2 text-center text-[11px] text-muted-foreground">
-              {isAndroidNative
-                ? "Не удалось загрузить превью из альбомов. Нажмите «Галерея» выше или загрузите файл с диска ниже."
-                : "Нет недавних фото. Выберите файл с диска ниже."}
+            <p className="mt-1.5 text-center text-xs text-muted-foreground">
+              {onChooseImageFromDevice
+                ? "Нет превью — ряд ниже или «Фото»."
+                : "Нет превью — ряд ниже или «Диск»."}
             </p>
           ) : null}
 
           {!Capacitor.isNativePlatform() && !galleryLoading ? (
-            <p className="mt-2 text-center text-[11px] text-muted-foreground">
-              В браузере список недавних фото недоступен — откройте приложение или выберите файл ниже.
+            <p className="mt-1.5 text-center text-xs text-muted-foreground">
+              {onChooseImageFromDevice ? "«Фото» или «Файл»" : "«Диск» "}
             </p>
           ) : null}
-        </div>
-
-        <div className="mt-2 flex flex-col gap-2 px-3">
-          <button
-            type="button"
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              if (!isVisible || !canAct) return;
-              finishAndClose(() => onUploadFile());
-            }}
-            className="flex w-full items-center justify-center gap-2 rounded-xl border border-border bg-muted/25 py-3 text-sm font-medium text-foreground hover:bg-muted/45 focus:outline-none focus:ring-2 focus:ring-primary/35"
-          >
-            <Upload className="h-4 w-4" />
-            Загрузить с диска
-          </button>
         </div>
       </div>
 
