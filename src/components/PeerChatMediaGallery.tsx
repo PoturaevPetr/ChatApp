@@ -15,6 +15,7 @@ import {
   type PeerMediaKind,
 } from "@/lib/peerChatMedia";
 import { groupMessagesByDate, formatMessageClock } from "@/utils/chatUtils";
+import { downloadBlobAsFile } from "@/lib/downloadBlob";
 import {
   AudioPlayer,
   ChatCircleVideo,
@@ -285,11 +286,9 @@ function MediaFileRow({ item }: { item: PeerMediaItem }) {
         url = await resolveFileRefFullUrl(tokens.access_token, item.file);
       }
       if (!url) return;
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = item.name || "file";
-      a.click();
+      const blob = await fetch(url).then((r) => r.blob());
       if (url.startsWith("blob:")) URL.revokeObjectURL(url);
+      downloadBlobAsFile(blob, item.name || "file");
     } catch {
       //
     } finally {

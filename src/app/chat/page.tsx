@@ -24,6 +24,7 @@ import { AuthGuard } from "@/components/AuthGuard";
 import { Layout } from "@/components/Layout";
 import { EmojiKeyboardPanel, EmojiKeyboardTrigger } from "@/components/EmojiPicker";
 import { AttachFileModal } from "@/components/AttachFileModal";
+import { ShareLocationModal } from "@/components/ShareLocationModal";
 import { useAuthStore } from "@/stores/authStore";
 import {
   useChatStore,
@@ -351,6 +352,7 @@ function ChatThreadContent() {
   const [fileError, setFileError] = useState<string | null>(null);
   const [replyingTo, setReplyingTo] = useState<ReplyTo | null>(null);
   const [attachModalOpen, setAttachModalOpen] = useState(false);
+  const [shareLocationOpen, setShareLocationOpen] = useState(false);
   const [emojiKeyboardOpen, setEmojiKeyboardOpen] = useState(false);
   /** Показывать подсказку из буфера только при фокусе и пустом поле (см. clipboardSuggestion). */
   const [composerInputFocused, setComposerInputFocused] = useState(false);
@@ -389,6 +391,7 @@ function ChatThreadContent() {
   const lastTypingSentAtRef = useRef(0);
   const emojiKeyboardOpenRef = useRef(false);
   const attachModalOpenRef = useRef(false);
+  const shareLocationOpenRef = useRef(false);
   const headerMenuOpenRef = useRef(false);
   const deleteModalOpenRef = useRef(false);
   const isDeletingChatRef = useRef(false);
@@ -852,10 +855,11 @@ function ChatThreadContent() {
 
   useEffect(() => {
     attachModalOpenRef.current = attachModalOpen;
+    shareLocationOpenRef.current = shareLocationOpen;
     headerMenuOpenRef.current = headerMenuOpen;
     deleteModalOpenRef.current = deleteModalOpen;
     isDeletingChatRef.current = isDeletingChat;
-  }, [attachModalOpen, headerMenuOpen, deleteModalOpen, isDeletingChat]);
+  }, [attachModalOpen, shareLocationOpen, headerMenuOpen, deleteModalOpen, isDeletingChat]);
 
   useEffect(() => {
     if (!emojiKeyboardOpen) return;
@@ -895,6 +899,10 @@ function ChatThreadContent() {
         setHeaderMenuOpen(false);
         return;
       }
+      if (shareLocationOpenRef.current) {
+        setShareLocationOpen(false);
+        return;
+      }
       if (attachModalOpenRef.current) {
         setAttachModalOpen(false);
         return;
@@ -931,8 +939,8 @@ function ChatThreadContent() {
   }, [emojiKeyboardOpen]);
 
   useEffect(() => {
-    if (attachModalOpen) setEmojiKeyboardOpen(false);
-  }, [attachModalOpen]);
+    if (attachModalOpen || shareLocationOpen) setEmojiKeyboardOpen(false);
+  }, [attachModalOpen, shareLocationOpen]);
 
   const [presenceClock, bumpPresenceClock] = useState(0);
   useEffect(() => {
@@ -2193,6 +2201,19 @@ function ChatThreadContent() {
                     onUploadFile={() => fileInputRef.current?.click()}
                     onImageFile={ingestFileForSend}
                     onChooseImageFromDevice={() => imagePickerInputRef.current?.click()}
+                    onShareLocation={() => setShareLocationOpen(true)}
+                  />
+                  <ShareLocationModal
+                    open={shareLocationOpen}
+                    onClose={() => setShareLocationOpen(false)}
+                    onSend={(lat, lng) => {
+                      flushTypingToServer();
+                      void sendMessage(user.id, threadPeerId, "", undefined, replyingTo ?? undefined, {
+                        lat,
+                        lng,
+                      });
+                      setReplyingTo(null);
+                    }}
                   />
                   <div className="flex min-w-0 flex-1 items-center gap-0.5 rounded-3xl border border-border bg-background py-1 pl-1.5 pr-1.5 focus-within:ring-2 focus-within:ring-primary/30">
                     <button

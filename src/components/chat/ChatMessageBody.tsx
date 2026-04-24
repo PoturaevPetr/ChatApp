@@ -1,7 +1,17 @@
 "use client";
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Loader2, Play, Pause, Captions, MoreVertical, Download, FileText } from "lucide-react";
+import {
+  Loader2,
+  Play,
+  Pause,
+  Captions,
+  MoreVertical,
+  Download,
+  FileText,
+  ArrowDown,
+  MapPin,
+} from "lucide-react";
 import { createPortal } from "react-dom";
 import type { ChatMessageContent, ChatMessageFile } from "@/stores/chatStore";
 import { createImagePreview } from "@/utils/chatUtils";
@@ -23,6 +33,9 @@ import {
   takeCachedBlobUrl,
 } from "@/lib/attachmentMediaCache";
 import { CHAT_MEDIA_PLAY_NEXT, requestPlayNextChatMediaAfter } from "@/lib/chatMediaSequence";
+import { downloadBlobAsFile } from "@/lib/downloadBlob";
+import { chatLocationStaticMapUrl } from "@/lib/chatLocationMap";
+import { ChatLocationMapModal } from "@/components/chat/ChatLocationMapModal";
 
 /** Останавливаем остальные аудио/видео в чате при старте воспроизведения (detail.playerId — свой id). */
 const CHAT_MEDIA_PLAY = "chatapp:media-play";
@@ -154,15 +167,20 @@ function FullscreenImageViewer({
         </button>
         {menuOpen ? (
           <div className="absolute right-0 mt-2 min-w-[150px] rounded-xl border border-white/15 bg-black/75 text-white shadow-xl overflow-hidden">
-            <a
-              href={src}
-              download={fileName}
-              className="flex items-center gap-2 px-3 py-2 text-sm hover:bg-white/10"
-              onClick={() => setMenuOpen(false)}
+            <button
+              type="button"
+              className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-white/10"
+              onClick={() => {
+                setMenuOpen(false);
+                void (async () => {
+                  const b = await fetch(src).then((r) => r.blob());
+                  downloadBlobAsFile(b, fileName);
+                })();
+              }}
             >
               <Download size={15} />
               Скачать
-            </a>
+            </button>
           </div>
         ) : null}
       </div>
@@ -963,13 +981,9 @@ function RefLinkedDocumentAttachment({
       setDownloadUi((prev) => (prev ? { ...prev, pct: 99, hint: "Расшифровка…" } : { pct: 99, hint: "Расшифровка…" }));
       const url = await ciphertextBlobToObjectUrl(blob, file.mimeType, ref.full_key_b64, ref.full_nonce_b64);
       setDownloadUi((prev) => (prev ? { ...prev, pct: 100, hint: "Сохранение…" } : { pct: 100, hint: "Сохранение…" }));
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = file.name;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 120_000);
+      const plainBlob = await fetch(url).then((r) => r.blob());
+      URL.revokeObjectURL(url);
+      downloadBlobAsFile(plainBlob, file.name);
     } catch (e) {
       window.alert(e instanceof Error ? e.message : "Не удалось скачать файл");
     } finally {
@@ -986,15 +1000,34 @@ function RefLinkedDocumentAttachment({
       {text ? <MessageTextWithLinks text={text} isOwn={isOwn} /> : null}
       <div
         className={`flex w-full max-w-[min(100%,20rem)] min-w-0 flex-col items-stretch rounded-xl border px-2.5 py-2 ${ring}`}
+        aria-busy={busy}
+        aria-live={busy ? "polite" : undefined}
       >
         {busy && downloadUi ? (
           <>
-            <div className="flex min-w-0 items-center gap-2 border-b border-black/5 pb-2 dark:border-white/10">
-              <FileText
-                className={`h-7 w-7 shrink-0 ${isOwn ? "text-primary-foreground/75" : "text-foreground/75"}`}
-                strokeWidth={1.75}
+            <div className="flex min-w-0 items-center gap-2.5 border-b border-black/5 pb-2 dark:border-white/10">
+              <div
+                className="relative flex h-10 w-10 shrink-0 items-center justify-center"
                 aria-hidden
-              />
+              >
+                <Loader2
+                  className={`absolute h-10 w-10 animate-spin motion-reduce:animate-none ${
+                    isOwn ? "text-primary-foreground/40" : "text-primary/50"
+                  }`}
+                  strokeWidth={2}
+                />
+                <FileText
+                  className={`relative z-[1] h-6 w-6 ${isOwn ? "text-primary-foreground/88" : "text-foreground/80"}`}
+                  strokeWidth={1.85}
+                />
+                <ArrowDown
+                  className={`pointer-events-none absolute left-1/2 top-[52%] z-[2] h-3.5 w-3.5 -translate-x-1/2 -translate-y-1/2 motion-safe:animate-pulse motion-reduce:animate-none motion-reduce:opacity-90 ${
+                    isOwn ? "text-primary-foreground drop-shadow-[0_0_2px_rgba(0,0,0,0.35)]" : "text-primary drop-shadow-sm"
+                  }`}
+                  strokeWidth={2.75}
+                  aria-hidden
+                />
+              </div>
               <span
                 className={`min-w-0 flex-1 truncate text-xs font-medium leading-tight ${
                   isOwn ? "text-primary-foreground/90" : "text-foreground/85"
@@ -1624,13 +1657,18 @@ function RemoteFileAttachmentInner({
       return (
         <div ref={containerRef} className="space-y-0.5">
           {text ? <MessageTextWithLinks text={text} isOwn={isOwn} /> : null}
-          <a
-            href={inlineDisplayUrl}
-            download={file.name}
-            className={`text-sm leading-snug underline ${isOwn ? "text-primary-foreground/90" : "text-primary"}`}
+          <button
+            type="button"
+            onClick={() =>
+              void (async () => {
+                const b = await fetch(inlineDisplayUrl).then((r) => r.blob());
+                downloadBlobAsFile(b, file.name);
+              })()
+            }
+            className={`text-left text-sm leading-snug underline ${isOwn ? "text-primary-foreground/90" : "text-primary"}`}
           >
             {file.name}
-          </a>
+          </button>
         </div>
       );
     }
@@ -1751,18 +1789,88 @@ function RemoteFileAttachmentInner({
     return (
       <div ref={containerRef} className="space-y-0.5">
         {text ? <MessageTextWithLinks text={text} isOwn={isOwn} /> : null}
-        <a
-          href={previewUrl}
-          download={file.name}
-          className={`text-sm leading-snug underline ${isOwn ? "text-primary-foreground/90" : "text-primary"}`}
+        <button
+          type="button"
+          onClick={() =>
+            void (async () => {
+              const b = await fetch(previewUrl).then((r) => r.blob());
+              downloadBlobAsFile(b, file.name);
+            })()
+          }
+          className={`text-left text-sm leading-snug underline ${isOwn ? "text-primary-foreground/90" : "text-primary"}`}
         >
           {file.name}
-        </a>
+        </button>
       </div>
     );
   }
 
   return <div ref={containerRef} />;
+}
+
+function LocationMessageBlock({ lat, lng, isOwn }: { lat: number; lng: number; isOwn: boolean }) {
+  const [mapOpen, setMapOpen] = useState(false);
+  const [imgFailed, setImgFailed] = useState(false);
+  /** Чуть крупнее превью для чёткости; пин на тайлах отключаем — один маркер в UI по центру кадра. */
+  const previewSrc = chatLocationStaticMapUrl(lat, lng, 720, 280, 15, false);
+
+  useEffect(() => {
+    setImgFailed(false);
+  }, [lat, lng]);
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setMapOpen(true)}
+        className={`relative block w-full max-w-[min(100%,280px)] overflow-hidden rounded-xl border text-left focus:outline-none focus:ring-2 focus:ring-primary/45 ${
+          isOwn ? "border-primary-foreground/25" : "border-border/70"
+        }`}
+        aria-label="Открыть карту"
+      >
+        <div className="relative aspect-[18/10] min-h-[100px] max-h-[200px] w-full bg-muted/50">
+          {!imgFailed ? (
+            <>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={previewSrc}
+                alt=""
+                className="absolute inset-0 h-full w-full object-cover"
+                loading="lazy"
+                decoding="async"
+                referrerPolicy="no-referrer"
+                onError={() => setImgFailed(true)}
+              />
+              {/* Носок пина в центре кадра (как точка center на static map). */}
+              <span
+                className="pointer-events-none absolute left-1/2 top-[50%] z-[1] -translate-x-1/2 -translate-y-full drop-shadow-md"
+                aria-hidden
+              >
+                <MapPin className="h-8 w-8 text-red-500" strokeWidth={2.25} />
+              </span>
+            </>
+          ) : (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 px-2 text-center">
+              <MapPin className={`h-8 w-8 ${isOwn ? "text-primary-foreground/80" : "text-muted-foreground"}`} aria-hidden />
+              <span className={`text-[10px] font-medium tabular-nums ${isOwn ? "text-primary-foreground/90" : "text-foreground/80"}`}>
+                {lat.toFixed(4)}, {lng.toFixed(4)}
+              </span>
+              <span className={`text-[9px] ${isOwn ? "text-primary-foreground/70" : "text-muted-foreground"}`}>Нажмите для карты</span>
+            </div>
+          )}
+        </div>
+        <span
+          className={`pointer-events-none absolute bottom-1.5 left-1.5 z-[2] inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[10px] font-medium ${
+            isOwn ? "bg-black/45 text-white" : "bg-black/50 text-white"
+          }`}
+        >
+          <MapPin className="h-3 w-3 shrink-0" aria-hidden />
+          Карта
+        </span>
+      </button>
+      <ChatLocationMapModal open={mapOpen} lat={lat} lng={lng} onClose={() => setMapOpen(false)} title="Карта" />
+    </>
+  );
 }
 
 function RemoteFileAttachment(
@@ -1799,6 +1907,8 @@ export function MessageBody({
   const main =
     content.type === "text" ? (
       <MessageTextWithLinks text={content.text || ""} isOwn={isOwn} />
+    ) : content.type === "location" ? (
+      <LocationMessageBlock lat={content.lat} lng={content.lng} isOwn={isOwn} />
     ) : (
       (() => {
         const { file, text } = content;
@@ -1947,13 +2057,18 @@ export function MessageBody({
               />
             ) : null}
             {!isImage && !isAudio && (
-              <a
-                href={dataUrl}
-                download={file.name}
-                className={`text-sm leading-snug underline ${isOwn ? "text-primary-foreground/90" : "text-primary"}`}
+              <button
+                type="button"
+                onClick={() =>
+                  void (async () => {
+                    const b = await fetch(dataUrl).then((r) => r.blob());
+                    downloadBlobAsFile(b, file.name);
+                  })()
+                }
+                className={`text-left text-sm leading-snug underline ${isOwn ? "text-primary-foreground/90" : "text-primary"}`}
               >
                 {file.name}
-              </a>
+              </button>
             )}
           </div>
         );

@@ -73,7 +73,8 @@ export interface ReplyTo {
 
 export type ChatMessageContent =
   | { type: "text"; text: string; reply_to?: ReplyTo }
-  | { type: "file"; text?: string; file: ChatMessageFile; reply_to?: ReplyTo };
+  | { type: "file"; text?: string; file: ChatMessageFile; reply_to?: ReplyTo }
+  | { type: "location"; lat: number; lng: number; reply_to?: ReplyTo };
 
 /** Реакция на сообщение (одна на пользователя в комнате, см. API). */
 export interface MessageReaction {
@@ -192,6 +193,15 @@ function memberFirstNameForGroupListPreview(u: {
   return displayNameForUserId(u.id);
 }
 
+function coalesceLocationNumber(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string") {
+    const n = parseFloat(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
 /** Собирает контент сообщения из расшифрованного JSON (inline file, file_ref или текст). */
 export function buildMessageContentFromDecrypt(content: Record<string, unknown> | null | undefined): ChatMessageContent {
   if (!content) return { type: "text", text: "" };
@@ -252,6 +262,15 @@ export function buildMessageContentFromDecrypt(content: Record<string, unknown> 
       },
       reply_to: replyTo,
     };
+  }
+  const locRaw = content.location;
+  if (locRaw && typeof locRaw === "object" && !Array.isArray(locRaw)) {
+    const lo = locRaw as Record<string, unknown>;
+    const lat = coalesceLocationNumber(lo.lat);
+    const lng = coalesceLocationNumber(lo.lng);
+    if (lat != null && lng != null && Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
+      return { type: "location", lat, lng, reply_to: replyTo };
+    }
   }
   return { type: "text", text, reply_to: replyTo };
 }
@@ -582,7 +601,8 @@ interface ChatState {
     recipientId: string,
     text: string,
     file?: SendMessageFileArg,
-    replyTo?: ReplyTo
+    replyTo?: ReplyTo,
+    location?: { lat: number; lng: number } | null
   ) => Promise<ChatMessage | null>;
   setActiveChat: (currentUserId: string, otherUser: ChatUser) => void;
   clearActiveChat: () => void;
@@ -1039,7 +1059,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     recipientId: string,
     text: string,
     fileParam?: SendMessageFileArg,
-    replyTo?: ReplyTo
+    replyTo?: ReplyTo,
+    locationArg?: { lat: number; lng: number } | null
   ): Promise<ChatMessage | null> => {
     let file: ChatMessageFile | undefined;
     if (fileParam) {
@@ -1054,6 +1075,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         };
       } else {
         file = fileParam as ChatMessageFile;
+      }
+    }
+    let location: { lat: number; lng: number } | undefined;
+    if (!file && locationArg) {
+      const lat = locationArg.lat;
+      const lng = locationArg.lng;
+      if (Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
+        location = { lat, lng };
       }
     }
     const state = get();
@@ -1272,6 +1301,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     } else if (file) {
       payload = { text: text || undefined, file: { name: file.name, mimeType: file.mimeType, data: file.data } };
+    } else if (location) {
+      payload = { location: { lat: location.lat, lng: location.lng } };
     } else {
       payload = { text };
     }
@@ -1366,7 +1397,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
           file: optimisticFileOverride ?? file,
           reply_to: replyTo,
         }
-      : { type: "text", text, reply_to: replyTo };
+      : location
+        ? { type: "location", lat: location.lat, lng: location.lng, reply_to: replyTo }
+        : { type: "text", text, reply_to: replyTo };
 
     let chatMessage: ChatMessage;
     if (file && optimisticUploadMessageId) {

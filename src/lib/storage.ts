@@ -94,7 +94,8 @@ export type StoredMessageContent =
         };
       };
       reply_to?: { id: string; preview: string };
-    };
+    }
+  | { type: "location"; lat: number; lng: number; reply_to?: { id: string; preview: string } };
 
 export interface StoredMessage {
   id: string;

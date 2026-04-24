@@ -80,9 +80,9 @@ export function MessageActionsOverlay({
 }: MessageActionsOverlayProps) {
   const [reactionsExpanded, setReactionsExpanded] = useState(false);
 
-  /** Копирование только для текстовых сообщений (в т.ч. со ссылками), не для вложений-фото/видео/аудио. */
+  /** Копирование для текста и геопозиции (координаты), не для вложений-фото/видео/аудио. */
   const plainText = useMemo(() => {
-    if (message.content.type !== "text") return "";
+    if (message.content.type !== "text" && message.content.type !== "location") return "";
     return getMessagePlainText(message.content).trim();
   }, [message.content]);
   const canCopy = plainText.length > 0;
@@ -90,7 +90,8 @@ export function MessageActionsOverlay({
   const canOpenLink = Boolean(openableUrl);
 
   const handleCopy = useCallback(async () => {
-    if (!canCopy || message.content.type !== "text") return;
+    if (!canCopy) return;
+    if (message.content.type !== "text" && message.content.type !== "location") return;
     const ok = await copyToClipboard(getMessagePlainText(message.content));
     if (ok) onClose();
   }, [canCopy, message.content, onClose]);

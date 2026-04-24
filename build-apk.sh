@@ -73,12 +73,15 @@ fi
 # Патчим манифест после cap sync: добавляем нужные permissions, если их ещё нет.
 # READ_MEDIA_* / READ_EXTERNAL_STORAGE — для @capacitor-community/media (androidGalleryMode: true в capacitor.config.ts),
 # иначе после «свежего» android/ превью галереи в модалке вложений не заработают.
+# ACCESS_*_LOCATION — для navigator.geolocation в WebView (модалка «Геопозиция» в чате).
 MANIFEST="android/app/src/main/AndroidManifest.xml"
 if [ -f "$MANIFEST" ]; then
   for perm in \
     "RECORD_AUDIO" \
     "MODIFY_AUDIO_SETTINGS" \
     "POST_NOTIFICATIONS" \
+    "ACCESS_COARSE_LOCATION" \
+    "ACCESS_FINE_LOCATION" \
     "READ_MEDIA_IMAGES" \
     "READ_MEDIA_VIDEO" \
     "READ_EXTERNAL_STORAGE" \

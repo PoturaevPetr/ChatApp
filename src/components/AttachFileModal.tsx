@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Capacitor } from "@capacitor/core";
-import { FileUp, ImagePlus, Loader2, SwitchCamera, Upload, X } from "lucide-react";
+import { FileUp, ImagePlus, Loader2, MapPin, SwitchCamera, Upload, X } from "lucide-react";
 import type { MediaAsset } from "@capacitor-community/media";
 import {
   fetchRecentGalleryMedias,
@@ -26,6 +26,8 @@ interface AttachFileModalProps {
    * Блок «Файл» открывает onUploadFile (любые типы).
    */
   onChooseImageFromDevice?: () => void;
+  /** Отправка геопозиции (отдельная модалка с картой на экране чата). */
+  onShareLocation?: () => void;
   /** Заголовок модалки (по умолчанию — общий текст вложения). */
   modalTitle?: string;
   modalSubtitle?: string;
@@ -64,6 +66,7 @@ export function AttachFileModal({
   onUploadFile,
   onImageFile,
   onChooseImageFromDevice,
+  onShareLocation,
   modalTitle,
   modalSubtitle,
 }: AttachFileModalProps) {
@@ -480,6 +483,26 @@ export function AttachFileModal({
               </div>
             )}
           </div>
+
+          {onShareLocation ? (
+            <div className="flex w-full justify-start pb-2 pt-0.5">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  if (!isVisible || !canAct) return;
+                  finishAndClose(() => onShareLocation());
+                }}
+                className="relative flex aspect-square w-1/3 max-w-[33%] flex-col items-center justify-center gap-0.5 overflow-hidden rounded-xl border border-border bg-muted/20 px-1 py-1 text-[10px] font-medium text-foreground hover:bg-muted/40 focus:outline-none focus:ring-2 focus:ring-primary/35 active:scale-[0.98]"
+              >
+                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-emerald-500/15 text-emerald-700 dark:text-emerald-400">
+                  <MapPin className="h-3.5 w-3.5" aria-hidden />
+                </span>
+                Геопозиция
+              </button>
+            </div>
+          ) : null}
 
           {supportsNativeGallery ? (
             <div className="pb-2">

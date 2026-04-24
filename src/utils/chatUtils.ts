@@ -35,10 +35,13 @@ export function formatChatDate(timestamp: string): string {
 }
 
 export function getMessagePreviewText(
-  content: { type: string; text?: string; file?: { name: string; mimeType?: string } } | string,
+  content:
+    | { type: string; text?: string; file?: { name: string; mimeType?: string }; lat?: number; lng?: number }
+    | string,
   maxLength = 50
 ): string {
   if (typeof content === "string") return content.length <= maxLength ? content : content.slice(0, maxLength) + "...";
+  if (content?.type === "location") return "Геопозиция";
   if (content?.type === "file" && content.file) {
     const mime = content.file.mimeType ?? "";
     const name = content.file.name ?? "";
@@ -66,7 +69,12 @@ export function getMessagePlainText(content: {
   type: string;
   text?: string;
   file?: { name: string; mimeType?: string };
+  lat?: number;
+  lng?: number;
 }): string {
+  if (content?.type === "location" && typeof content.lat === "number" && typeof content.lng === "number") {
+    return `Геопозиция: ${content.lat.toFixed(6)}, ${content.lng.toFixed(6)}`;
+  }
   if (content?.type === "file" && content.file) {
     const mime = content.file.mimeType ?? "";
     const name = content.file.name ?? "";
