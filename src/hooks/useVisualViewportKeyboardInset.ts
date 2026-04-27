@@ -80,14 +80,32 @@ export function useVisualViewportKeyboardInset(): number {
       window.setTimeout(run, 520);
     };
 
-    const onFocusIn = (e: FocusEvent) => bump(e.target);
+    let focusOutTimeouts: number[] = [];
+    const clearFocusOutTimeouts = () => {
+      focusOutTimeouts.forEach((id) => window.clearTimeout(id));
+      focusOutTimeouts = [];
+    };
+
+    const onFocusIn = (e: FocusEvent) => {
+      clearFocusOutTimeouts();
+      bump(e.target);
+    };
+
+    /** После dismiss клавиатуры vv/innerHeight обновляются с задержкой — иначе bottom композера «залипает». */
     const onFocusOut = () => {
-      window.setTimeout(recalcVisualViewport, 120);
+      clearFocusOutTimeouts();
+      const run = () => recalcVisualViewport();
+      run();
+      requestAnimationFrame(run);
+      for (const ms of [50, 120, 220, 380, 600, 900]) {
+        focusOutTimeouts.push(window.setTimeout(run, ms));
+      }
     };
 
     document.addEventListener("focusin", onFocusIn);
     document.addEventListener("focusout", onFocusOut);
     return () => {
+      clearFocusOutTimeouts();
       document.removeEventListener("focusin", onFocusIn);
       document.removeEventListener("focusout", onFocusOut);
     };
@@ -156,9 +174,16 @@ export function useVisualViewportKeyboardInset(): number {
             setNativeKeyboardPx(0);
             setLayoutAlreadyShrunkForKeyboard(false);
             innerAtKeyboardWillRef.current = 0;
+            const bumpVv = () => recalcVisualViewport();
+            bumpVv();
+            requestAnimationFrame(bumpVv);
+            window.setTimeout(bumpVv, 80);
+            window.setTimeout(bumpVv, 220);
+            window.setTimeout(bumpVv, 450);
             window.setTimeout(() => {
               if (!mounted) return;
               baselineInnerHRef.current = window.innerHeight;
+              bumpVv();
             }, 100);
           });
           if (!mounted) {

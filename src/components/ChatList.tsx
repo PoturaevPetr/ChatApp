@@ -101,8 +101,12 @@ export function ChatList() {
   const isEmpty = !listLoading && sorted.length === 0;
 
   return (
-    <div className="flex flex-col h-full position-relative">
-      <div className="absolute right-2 flex flex-col gap-2 border rounded-full p-2 bg-primary/60 text-white bottom-[calc(1.25rem+env(safe-area-inset-bottom,0px))]">
+    <div className="relative flex h-full min-h-0 flex-col">
+      {/* Мобилка: fixed — всегда у низа вьюпорта; md+: absolute — низ колонки списка */}
+      <div
+        className="pointer-events-auto fixed bottom-[calc(1.25rem+env(safe-area-inset-bottom,0px))] right-2 z-40 flex flex-col gap-2 rounded-full border bg-primary/60 p-2 text-white md:absolute md:bottom-[calc(1.25rem+env(safe-area-inset-bottom,0px))] md:right-2"
+        aria-label="Действия со списком чатов"
+      >
         <button
           type="button"
           onClick={() => setStartChatOpen(true)}
@@ -174,8 +178,8 @@ export function ChatList() {
                 <Link
                   href={
                     isGroupThreadPeerId(chat.otherUser.id)
-                      ? `/chat?roomId=${encodeURIComponent(chat.id)}`
-                      : `/chat?userId=${encodeURIComponent(chat.otherUser.id)}`
+                      ? `/?roomId=${encodeURIComponent(chat.id)}`
+                      : `/?userId=${encodeURIComponent(chat.otherUser.id)}`
                   }
                   className="flex items-center gap-3 p-4 hover:bg-muted/50 active:bg-muted"
                 >
@@ -197,11 +201,6 @@ export function ChatList() {
                         {getInitials(chat.otherUser.name)}
                       </div>
                     )}
-                    {chat.unreadCount > 0 && (
-                      <span className="absolute -top-0.5 -right-0.5 min-w-[20px] h-5 px-1.5 rounded-full bg-primary text-primary-foreground text-xs flex items-center justify-center">
-                        {chat.unreadCount > 99 ? "99+" : chat.unreadCount}
-                      </span>
-                    )}
                   </div>
                   <div className="min-w-0 flex-1 flex items-start gap-2">
                     <div className="min-w-0 flex-1">
@@ -217,6 +216,11 @@ export function ChatList() {
                         <span className="text-xs text-muted-foreground tabular-nums leading-none">
                           {formatMessageTime(chat.lastMessage.timestamp)}
                         </span>
+                        {chat.unreadCount > 0 ? (
+                          <span className="h-5 w-5 rounded-full bg-primary text-primary-foreground text-[10px] flex items-center justify-center leading-none">
+                            {chat.unreadCount > 99 ? "99+" : chat.unreadCount}
+                          </span>
+                        ) : null}
                         {isOwnMessage(chat.lastMessage, user.id) ? (
                           <OutgoingReceiptTicks status={chat.lastMessage.status} variant="onClear" />
                         ) : null}

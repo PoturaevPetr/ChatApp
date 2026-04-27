@@ -13,6 +13,8 @@ import { LogOut, Loader2, Pencil } from "lucide-react";
 import NextImage from "next/image";
 import { ProfileEditModal } from "@/components/ProfileEditModal";
 import { fileToAvatarDataUrl } from "@/lib/avatarImage";
+import { Capacitor } from "@capacitor/core";
+import { App } from "@capacitor/app";
 
 function getInitials(name: string): string {
   const s = (name || "").trim();
@@ -88,6 +90,7 @@ export default function ProfilePage() {
   const [showEditProfileModal, setShowEditProfileModal] = useState(false);
   const [isUploadingAvatar, setIsUploadingAvatar] = useState(false);
   const [avatarError, setAvatarError] = useState<string | null>(null);
+  const [appVersionText, setAppVersionText] = useState<string>("");
   /** Без `capture` — открывается галерея / выбор фото. */
   const avatarGalleryInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -154,6 +157,28 @@ export default function ProfilePage() {
       cancelled = true;
     };
   }, [user?.id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const platform = Capacitor.getPlatform();
+      if (Capacitor.isNativePlatform()) {
+        const info = await App.getInfo().catch(() => null);
+        if (cancelled) return;
+        const version = (info?.version || "").trim();
+        if (version) {
+          setAppVersionText(`Версия ${version} (${platform})`);
+          return;
+        }
+      }
+      const webVersion = (process.env.NEXT_PUBLIC_APP_VERSION || "").trim();
+      if (cancelled) return;
+      setAppVersionText(webVersion ? `Версия ${webVersion} (web)` : `Платформа: ${platform}`);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const displayName = profile?.name?.trim() || user?.name?.trim() || "Пользователь";
 
@@ -254,6 +279,10 @@ export default function ProfilePage() {
                     <LogOut size={20} />
                     <span>Выйти</span>
                   </button>
+
+                  <p className="mt-6 text-center text-xs text-muted-foreground">
+                    {appVersionText || "Версия приложения"}
+                  </p>
                 </>
               )}
             </div>

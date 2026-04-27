@@ -1,5 +1,6 @@
 "use client";
 
+import type { RefObject } from "react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Capacitor } from "@capacitor/core";
@@ -31,6 +32,11 @@ interface AttachFileModalProps {
   /** Заголовок модалки (по умолчанию — общий текст вложения). */
   modalTitle?: string;
   modalSubtitle?: string;
+  /**
+   * Корень для портала: оверлей только внутри этой области (вложенный чат на главной).
+   * Без ref — как раньше, на весь вьюпорт через document.body.
+   */
+  portalRootRef?: RefObject<HTMLElement | null>;
 }
 
 const ANIMATION_MS = 300;
@@ -69,6 +75,7 @@ export function AttachFileModal({
   onShareLocation,
   modalTitle,
   modalSubtitle,
+  portalRootRef,
 }: AttachFileModalProps) {
   const [isVisible, setIsVisible] = useState(false);
   const [isExiting, setIsExiting] = useState(false);
@@ -364,9 +371,26 @@ export function AttachFileModal({
 
   if (!isOpen || !portalReady) return null;
 
-  return createPortal(
+  const portalHost = portalRootRef?.current ?? null;
+  const mountNode = portalHost ?? document.body;
+  const contained = portalHost != null;
+  const overlayBox = contained ? "absolute inset-0" : "fixed inset-0";
+  const sheetMaxH = contained ? "max-h-[85%]" : "max-h-[min(85dvh,640px)]";
+
+  const attachTileGridClass =
+    onChooseImageFromDevice && onShareLocation
+      ? "grid-cols-4"
+      : onChooseImageFromDevice || onShareLocation
+        ? "grid-cols-3"
+        : "grid-cols-2";
+
+  /** Квадратные карточки действий — одинаковый max с камерой/фото/файлом. */
+  const attachOptionTileClass =
+    "relative flex aspect-square w-full max-w-[min(100%,9.5rem)] flex-col items-center justify-center gap-0.5 overflow-hidden rounded-xl border border-border bg-muted/20 px-1 py-1 text-[10px] font-medium text-foreground hover:bg-muted/40 focus:outline-none focus:ring-2 focus:ring-primary/35 active:scale-[0.98]";
+
+  const attachModalRoot = (
     <div
-      className="pointer-events-auto fixed inset-0 z-[10050] flex flex-col justify-end"
+      className={`pointer-events-auto z-[10050] flex flex-col justify-end ${overlayBox}`}
       role="dialog"
       aria-modal="true"
       aria-labelledby="attach-modal-title"
@@ -384,7 +408,7 @@ export function AttachFileModal({
         aria-hidden
       />
       <div
-        className="relative w-full max-h-[min(85dvh,640px)] overflow-hidden rounded-t-3xl border-t border-border bg-card shadow-[0_-8px_32px_rgba(0,0,0,0.12)] pb-[calc(0.75rem+env(safe-area-inset-bottom,0px))] transition-transform ease-out"
+        className={`relative w-full ${sheetMaxH} overflow-hidden rounded-t-3xl border-t border-border bg-card shadow-[0_-8px_32px_rgba(0,0,0,0.12)] pb-[calc(0.75rem+env(safe-area-inset-bottom,0px))] transition-transform ease-out`}
         style={{
           transitionDuration: `${ANIMATION_MS}ms`,
           transform: isVisible && !isExiting ? "translateY(0)" : "translateY(100%)",
@@ -402,14 +426,7 @@ export function AttachFileModal({
         ) : null}
 
         <div className="mt-2 px-3">
-          {/* Один ряд: камера | фото | файл — одинаковые квадраты (или камера | диск). Галерея — ниже на всю ширину. */}
-          <div
-            className={`grid w-full gap-2 pb-2 pt-0.5 ${
-              onChooseImageFromDevice
-                ? "grid-cols-3 [grid-template-columns:minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)]"
-                : "grid-cols-2 [grid-template-columns:minmax(0,1fr)_minmax(0,1fr)]"
-            }`}
-          >
+          <div className={`grid w-full gap-2 pb-2 pt-0.5 ${attachTileGridClass}`}>
             <div className="min-w-0 flex items-center justify-center">
               <button
                 type="button"
@@ -439,7 +456,7 @@ export function AttachFileModal({
                       if (!isVisible || !canAct) return;
                       finishAndClose(() => onChooseImageFromDevice());
                     }}
-                    className="relative flex aspect-square w-full max-w-[min(100%,9.5rem)] flex-col items-center justify-center gap-0.5 overflow-hidden rounded-xl border border-border bg-muted/20 px-1 py-1 text-[10px] font-medium text-foreground hover:bg-muted/40 focus:outline-none focus:ring-2 focus:ring-primary/35 active:scale-[0.98]"
+                    className={attachOptionTileClass}
                   >
                     <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary/12 text-primary">
                       <ImagePlus className="h-3.5 w-3.5" aria-hidden />
@@ -456,7 +473,7 @@ export function AttachFileModal({
                       if (!isVisible || !canAct) return;
                       finishAndClose(() => onUploadFile());
                     }}
-                    className="relative flex aspect-square w-full max-w-[min(100%,9.5rem)] flex-col items-center justify-center gap-0.5 overflow-hidden rounded-xl border border-border bg-muted/20 px-1 py-1 text-[10px] font-medium text-foreground hover:bg-muted/40 focus:outline-none focus:ring-2 focus:ring-primary/35 active:scale-[0.98]"
+                    className={attachOptionTileClass}
                   >
                     <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground">
                       <FileUp className="h-3.5 w-3.5" aria-hidden />
@@ -475,34 +492,36 @@ export function AttachFileModal({
                     if (!isVisible || !canAct) return;
                     finishAndClose(() => onUploadFile());
                   }}
-                  className="relative flex aspect-square w-full max-w-[min(100%,9.5rem)] flex-col items-center justify-center gap-1 overflow-hidden rounded-xl border border-border bg-muted/25 px-2 py-2 text-[10px] font-medium text-foreground hover:bg-muted/45 focus:outline-none focus:ring-2 focus:ring-primary/35"
+                  className={attachOptionTileClass}
                 >
-                  <Upload className="h-5 w-5 shrink-0 text-muted-foreground" aria-hidden />
+                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground">
+                    <Upload className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                  </span>
                   Диск
                 </button>
               </div>
             )}
-          </div>
 
-          {onShareLocation ? (
-            <div className="flex w-full justify-start pb-2 pt-0.5">
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  if (!isVisible || !canAct) return;
-                  finishAndClose(() => onShareLocation());
-                }}
-                className="relative flex aspect-square w-1/3 max-w-[33%] flex-col items-center justify-center gap-0.5 overflow-hidden rounded-xl border border-border bg-muted/20 px-1 py-1 text-[10px] font-medium text-foreground hover:bg-muted/40 focus:outline-none focus:ring-2 focus:ring-primary/35 active:scale-[0.98]"
-              >
-                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-emerald-500/15 text-emerald-700 dark:text-emerald-400">
-                  <MapPin className="h-3.5 w-3.5" aria-hidden />
-                </span>
-                Геопозиция
-              </button>
-            </div>
-          ) : null}
+            {onShareLocation ? (
+              <div className="min-w-0 flex items-center justify-center">
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (!isVisible || !canAct) return;
+                    finishAndClose(() => onShareLocation());
+                  }}
+                  className={attachOptionTileClass}
+                >
+                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-emerald-500/15 text-emerald-700 dark:text-emerald-400">
+                    <MapPin className="h-3.5 w-3.5" aria-hidden />
+                  </span>
+                  Геопозиция
+                </button>
+              </div>
+            ) : null}
+          </div>
 
           {supportsNativeGallery ? (
             <div className="pb-2">
@@ -605,55 +624,63 @@ export function AttachFileModal({
           ) : null}
         </div>
       </div>
+    </div>
+  );
 
-      {fullscreenCamera ? (
-        <div
-          className="fixed inset-0 z-[10060] flex flex-col bg-black"
-          role="presentation"
-          onClick={(e) => e.stopPropagation()}
-        >
-          <div className="flex items-center justify-between gap-2 px-3 pt-[max(0.75rem,env(safe-area-inset-top))] pb-2">
-            <span className="min-w-0 truncate text-sm font-medium text-white/90">Снимок</span>
-            <div className="flex shrink-0 items-center gap-0.5">
-              <button
-                type="button"
-                onClick={() => void handleSwitchCamera()}
-                disabled={switchingCamera || !cameraStream}
-                className="rounded-full p-2 text-white hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-white/40 disabled:pointer-events-none disabled:opacity-40"
-                aria-label="Переключить камеру"
-                title="Переключить камеру"
-              >
-                {switchingCamera ? (
-                  <Loader2 className="h-6 w-6 animate-spin" aria-hidden />
-                ) : (
-                  <SwitchCamera className="h-6 w-6" aria-hidden />
-                )}
-              </button>
-              <button
-                type="button"
-                onClick={closeFullscreen}
-                className="rounded-full p-2 text-white hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-white/40"
-                aria-label="Закрыть"
-              >
-                <X className="h-6 w-6" />
-              </button>
-            </div>
-          </div>
-          <div className="relative min-h-0 flex-1">
-            <video ref={fullVideoRef} className="h-full w-full object-cover" playsInline muted autoPlay />
-          </div>
-          <div className="flex justify-center py-6 pb-[max(1.5rem,env(safe-area-inset-bottom,0px))]">
+  /** Всегда на весь вьюпорт: не ограничивать областью чата при портале в thread. */
+  const fullscreenCameraLayer =
+    fullscreenCamera ? (
+      <div
+        className="pointer-events-auto fixed inset-0 z-[10060] flex flex-col bg-black"
+        role="presentation"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between gap-2 px-3 pt-[max(0.75rem,env(safe-area-inset-top))] pb-2">
+          <span className="min-w-0 truncate text-sm font-medium text-white/90">Снимок</span>
+          <div className="flex shrink-0 items-center gap-0.5">
             <button
               type="button"
-              onClick={handleCapturePhoto}
-              disabled={capturing}
-              className="h-[72px] w-[72px] shrink-0 rounded-full border-[5px] border-white/90 bg-white/25 shadow-lg focus:outline-none focus:ring-4 focus:ring-white/30 disabled:opacity-50"
-              aria-label="Сделать фото"
-            />
+              onClick={() => void handleSwitchCamera()}
+              disabled={switchingCamera || !cameraStream}
+              className="rounded-full p-2 text-white hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-white/40 disabled:pointer-events-none disabled:opacity-40"
+              aria-label="Переключить камеру"
+              title="Переключить камеру"
+            >
+              {switchingCamera ? (
+                <Loader2 className="h-6 w-6 animate-spin" aria-hidden />
+              ) : (
+                <SwitchCamera className="h-6 w-6" aria-hidden />
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={closeFullscreen}
+              className="rounded-full p-2 text-white hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-white/40"
+              aria-label="Закрыть"
+            >
+              <X className="h-6 w-6" />
+            </button>
           </div>
         </div>
-      ) : null}
-    </div>,
-    document.body
+        <div className="relative min-h-0 flex-1">
+          <video ref={fullVideoRef} className="h-full w-full object-cover" playsInline muted autoPlay />
+        </div>
+        <div className="flex justify-center py-6 pb-[max(1.5rem,env(safe-area-inset-bottom,0px))]">
+          <button
+            type="button"
+            onClick={handleCapturePhoto}
+            disabled={capturing}
+            className="h-[72px] w-[72px] shrink-0 rounded-full border-[5px] border-white/90 bg-white/25 shadow-lg focus:outline-none focus:ring-4 focus:ring-white/30 disabled:opacity-50"
+            aria-label="Сделать фото"
+          />
+        </div>
+      </div>
+    ) : null;
+
+  return (
+    <>
+      {createPortal(attachModalRoot, mountNode)}
+      {fullscreenCameraLayer ? createPortal(fullscreenCameraLayer, document.body) : null}
+    </>
   );
 }

@@ -50,7 +50,7 @@ export default function UsersPage() {
               <li key={u.id}>
                 <button
                   type="button"
-                  onClick={() => router.push(`/chat?userId=${encodeURIComponent(u.id)}`)}
+                  onClick={() => router.push(`/?userId=${encodeURIComponent(u.id)}`)}
                   className="w-full flex items-center gap-3 p-4 hover:bg-muted/50 active:bg-muted text-left"
                 >
                   <div className="w-12 h-12 rounded-full bg-primary/20 text-primary flex items-center justify-center font-medium">

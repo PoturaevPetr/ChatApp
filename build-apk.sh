@@ -8,6 +8,13 @@ PROJECT_DIR="$SCRIPT_DIR"
 APP_NAME="Kindred"
 APK_OUT_NAME="Kindred.apk"
 
+# Версия Android-сборки: попадает в App.getInfo() и в проверку /api/v1/mobile/version-check.
+# Укажите те же major.minor.patch, что при загрузке APK в админке релизов ChatService.
+# versionCode — целое, должно расти с каждой публикацией (магазин / устройство сравнивают коды).
+# Пример разбора для 1.6.6: 1*10000 + 6*100 + 6 = 10606.
+APP_VERSION_NAME="1.7.1"
+APP_VERSION_CODE=10701
+
 echo "🔧 Сборка APK: $APP_NAME"
 echo "   Проект: $PROJECT_DIR"
 
@@ -55,6 +62,20 @@ fi
 echo "🔄 Синхронизация Capacitor..."
 npx cap sync android
 
+# Подставляем versionName / versionCode (cap sync мог перезаписать шаблон из CLI).
+GRADLE_FILE="$PROJECT_DIR/android/app/build.gradle"
+if [ -f "$GRADLE_FILE" ]; then
+  echo "🔢 Версия APK: versionName=$APP_VERSION_NAME versionCode=$APP_VERSION_CODE"
+  sed -i.bak \
+    -e "s/versionCode [0-9][0-9]*/versionCode $APP_VERSION_CODE/" \
+    -e "s/versionName \"[^\"]*\"/versionName \"$APP_VERSION_NAME\"/" \
+    "$GRADLE_FILE"
+  rm -f "${GRADLE_FILE}.bak"
+else
+  echo "❌ Не найден $GRADLE_FILE"
+  exit 1
+fi
+
 # После cap sync тема запуска может снова ссылаться на @drawable/splash — возвращаем белый splash + иконка по центру.
 STYLES="$PROJECT_DIR/android/app/src/main/res/values/styles.xml"
 if [ -f "$PROJECT_DIR/android/app/src/main/res/drawable/splash_white.xml" ] && [ -f "$STYLES" ] && grep -q '@drawable/splash</item>' "$STYLES" && ! grep -q 'splash_white' "$STYLES"; then
@@ -80,6 +101,7 @@ if [ -f "$MANIFEST" ]; then
     "RECORD_AUDIO" \
     "MODIFY_AUDIO_SETTINGS" \
     "POST_NOTIFICATIONS" \
+    "REQUEST_INSTALL_PACKAGES" \
     "ACCESS_COARSE_LOCATION" \
     "ACCESS_FINE_LOCATION" \
     "READ_MEDIA_IMAGES" \
@@ -172,7 +194,7 @@ if [ -f "$APK_PATH" ]; then
         cp "$APK_PATH" "$HOME/Desktop/$APK_OUT_NAME"
         echo "   На рабочий стол: $HOME/Desktop/$APK_OUT_NAME"
     fi
-    echo "🎉 Готово. Установите $APK_OUT_NAME на устройство."
+    echo "🎉 Готово. Установите $APK_OUT_NAME на устройство (versionName=$APP_VERSION_NAME, versionCode=$APP_VERSION_CODE)."
 else
     echo "❌ APK не найден: $APK_PATH"
     exit 1

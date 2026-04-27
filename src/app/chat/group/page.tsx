@@ -175,7 +175,7 @@ function GroupProfileContent() {
 
   const openChat = () => {
     if (!roomId) return;
-    router.push(`/chat?roomId=${encodeURIComponent(roomId)}`);
+    router.push(`/?roomId=${encodeURIComponent(roomId)}`);
   };
 
   const ingestGroupAvatarFile = async (f: File) => {

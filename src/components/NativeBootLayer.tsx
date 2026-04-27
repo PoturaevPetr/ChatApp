@@ -2,6 +2,7 @@
 
 import type { ReactNode } from "react";
 import { NativeLaunchOverlay } from "@/components/NativeLaunchOverlay";
+import { MobileUpdateGate } from "@/components/MobileUpdateGate";
 
 /** Обертка корня: поверх приложения — нативный старт Kindred (только Capacitor). */
 export function NativeBootLayer({ children }: { children: ReactNode }) {
@@ -9,6 +10,7 @@ export function NativeBootLayer({ children }: { children: ReactNode }) {
     <>
       {children}
       <NativeLaunchOverlay />
+      <MobileUpdateGate />
     </>
   );
 }

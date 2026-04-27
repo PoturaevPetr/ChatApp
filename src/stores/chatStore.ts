@@ -119,7 +119,7 @@ function threadId(a: string, b: string): string {
   return [a, b].sort().join("_");
 }
 
-/** Синтетический peer id для групповой комнаты (см. `/chat?roomId=…`). Не путать с UUID пользователя. */
+/** Синтетический peer id для групповой комнаты (см. `/?roomId=…`). Не путать с UUID пользователя. */
 const GROUP_THREAD_PEER_PREFIX = "g:";
 
 export function groupSyntheticPeerId(roomId: string): string {

@@ -7,6 +7,7 @@ import { AuthGuard } from "@/components/AuthGuard";
 import { Layout } from "@/components/Layout";
 import { useAuthStore } from "@/stores/authStore";
 import { getValidAuthTokens } from "@/lib/validAuthToken";
+import { markNextChatOverlayOpenWithoutSlide } from "@/lib/chatOverlayEvents";
 import { getUserById } from "@/services/chatUsersApi";
 import type { UserSearchItem } from "@/services/chatUsersApi";
 import { formatPeerPresenceLabel } from "@/lib/formatPeerPresence";
@@ -109,7 +110,8 @@ function UserProfileContent() {
 
   const handleWriteMessage = () => {
     if (!userId) return;
-    router.push(`/chat?userId=${encodeURIComponent(userId)}`);
+    markNextChatOverlayOpenWithoutSlide();
+    router.push(`/?userId=${encodeURIComponent(userId)}`);
   };
 
   return (

@@ -150,7 +150,7 @@ export function CreateGroupModal({ isOpen, onClose }: CreateGroupModalProps) {
         avatar: groupAvatarDataUrl ?? undefined,
       });
       handleClose();
-      router.push(`/chat?roomId=${encodeURIComponent(room.id)}`);
+      router.push(`/?roomId=${encodeURIComponent(room.id)}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Не удалось создать группу");
     } finally {
