@@ -12,8 +12,8 @@ APK_OUT_NAME="Kindred.apk"
 # Укажите те же major.minor.patch, что при загрузке APK в админке релизов ChatService.
 # versionCode — целое, должно расти с каждой публикацией (магазин / устройство сравнивают коды).
 # Пример разбора для 1.6.6: 1*10000 + 6*100 + 6 = 10606.
-APP_VERSION_NAME="1.7.1"
-APP_VERSION_CODE=10701
+APP_VERSION_NAME="1.8.2"
+APP_VERSION_CODE=10802
 
 echo "🔧 Сборка APK: $APP_NAME"
 echo "   Проект: $PROJECT_DIR"
@@ -44,6 +44,11 @@ rm -rf out .next
 # Папку android не удаляем: при «обнулении» вручную достаточно снова запустить скрипт — выполнится
 # `cap add android` (если папки нет) и `cap sync`, который перезаписывает сгенерированные файлы в android/.
 # Любые постоянные правки нативного слоя (манифест, разрешения) держим здесь, после cap sync.
+#
+# Звонки Meet: страница в WebView — https (server.androidScheme), сигналинг часто ws:// к LAN.
+# В capacitor.config.ts задано android.allowMixedContent — оно попадает в android/.../assets/capacitor.config.json
+# на шаге `npx cap sync android` ниже. Дополнительно в репозитории лежит MainActivity.java с
+# MIXED_CONTENT_ALWAYS_ALLOW (не трогайте при копировании шаблона с нуля). Вся сборка APK — через этот скрипт.
 
 # Next.js
 echo "📦 Сборка Next.js..."
@@ -61,6 +66,13 @@ fi
 
 echo "🔄 Синхронизация Capacitor..."
 npx cap sync android
+
+# Meet / WebView: убедиться, что кастомный MainActivity не потерян (например после ручного cap add / копирования android/).
+MAIN_ACTIVITY="$(find "$PROJECT_DIR/android/app/src/main/java" -name MainActivity.java 2>/dev/null | head -1)"
+if [ -n "$MAIN_ACTIVITY" ] && ! grep -q "MIXED_CONTENT_ALWAYS_ALLOW" "$MAIN_ACTIVITY" 2>/dev/null; then
+  echo "⚠️  В $MAIN_ACTIVITY нет MIXED_CONTENT_ALWAYS_ALLOW — ws:// к Meet с https-страницы может блокироваться WebView."
+  echo "   Восстановите MainActivity из репозитория или см. комментарий про Meet выше."
+fi
 
 # Подставляем versionName / versionCode (cap sync мог перезаписать шаблон из CLI).
 GRADLE_FILE="$PROJECT_DIR/android/app/build.gradle"

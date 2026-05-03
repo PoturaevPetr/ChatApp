@@ -71,10 +71,18 @@ export interface ReplyTo {
   preview: string;
 }
 
+/** Журнал звонка Meet в теле E2E-сообщения (одинаково расшифровывается у обоих). */
+export type MeetCallLogPayload = {
+  initiated_by: string;
+  outcome: "completed" | "missed" | "declined";
+  duration_sec?: number;
+};
+
 export type ChatMessageContent =
   | { type: "text"; text: string; reply_to?: ReplyTo }
   | { type: "file"; text?: string; file: ChatMessageFile; reply_to?: ReplyTo }
-  | { type: "location"; lat: number; lng: number; reply_to?: ReplyTo };
+  | { type: "location"; lat: number; lng: number; reply_to?: ReplyTo }
+  | ({ type: "call_log" } & MeetCallLogPayload);
 
 /** Реакция на сообщение (одна на пользователя в комнате, см. API). */
 export interface MessageReaction {
@@ -270,6 +278,22 @@ export function buildMessageContentFromDecrypt(content: Record<string, unknown> 
     const lng = coalesceLocationNumber(lo.lng);
     if (lat != null && lng != null && Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
       return { type: "location", lat, lng, reply_to: replyTo };
+    }
+  }
+  const cl = content.call_log as Record<string, unknown> | undefined;
+  if (cl && typeof cl === "object") {
+    const initiated_by = typeof cl.initiated_by === "string" ? cl.initiated_by.trim() : "";
+    const outcome = cl.outcome === "completed" || cl.outcome === "missed" || cl.outcome === "declined" ? cl.outcome : "";
+    const ds = cl.duration_sec;
+    const duration_sec =
+      typeof ds === "number" && Number.isFinite(ds) && ds >= 0 ? Math.floor(ds) : undefined;
+    if (initiated_by && outcome) {
+      return {
+        type: "call_log",
+        initiated_by,
+        outcome,
+        ...(duration_sec != null ? { duration_sec } : {}),
+      };
     }
   }
   return { type: "text", text, reply_to: replyTo };
@@ -602,7 +626,8 @@ interface ChatState {
     text: string,
     file?: SendMessageFileArg,
     replyTo?: ReplyTo,
-    location?: { lat: number; lng: number } | null
+    location?: { lat: number; lng: number } | null,
+    callLog?: MeetCallLogPayload | null,
   ) => Promise<ChatMessage | null>;
   setActiveChat: (currentUserId: string, otherUser: ChatUser) => void;
   clearActiveChat: () => void;
@@ -1060,8 +1085,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     text: string,
     fileParam?: SendMessageFileArg,
     replyTo?: ReplyTo,
-    locationArg?: { lat: number; lng: number } | null
+    locationArg?: { lat: number; lng: number } | null,
+    callLog?: MeetCallLogPayload | null,
   ): Promise<ChatMessage | null> => {
+    if (callLog && (fileParam || locationArg)) {
+      set({ error: "Внутренняя ошибка: call_log не сочетается с файлом или гео." });
+      return null;
+    }
     let file: ChatMessageFile | undefined;
     if (fileParam) {
       if ("nativeFile" in fileParam && fileParam.nativeFile) {
@@ -1299,6 +1329,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set({ error: e instanceof Error ? e.message : "Не удалось загрузить файл" });
         return null;
       }
+    } else if (callLog) {
+      payload = {
+        call_log: {
+          initiated_by: callLog.initiated_by,
+          outcome: callLog.outcome,
+          ...(callLog.duration_sec != null ? { duration_sec: callLog.duration_sec } : {}),
+        },
+      };
     } else if (file) {
       payload = { text: text || undefined, file: { name: file.name, mimeType: file.mimeType, data: file.data } };
     } else if (location) {
@@ -1383,6 +1421,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         data: {
           room_id: roomId,
           e2e: e2ePayload,
+          ...(callLog ? { e2e_suppress_push: true } : {}),
         },
       });
     } else if (roomId) {
@@ -1390,16 +1429,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return null;
     }
 
-    const content: ChatMessageContent = file
+    const content: ChatMessageContent = callLog
       ? {
-          type: "file",
-          text: text || undefined,
-          file: optimisticFileOverride ?? file,
-          reply_to: replyTo,
+          type: "call_log",
+          initiated_by: callLog.initiated_by,
+          outcome: callLog.outcome,
+          ...(callLog.duration_sec != null ? { duration_sec: callLog.duration_sec } : {}),
         }
-      : location
-        ? { type: "location", lat: location.lat, lng: location.lng, reply_to: replyTo }
-        : { type: "text", text, reply_to: replyTo };
+      : file
+        ? {
+            type: "file",
+            text: text || undefined,
+            file: optimisticFileOverride ?? file,
+            reply_to: replyTo,
+          }
+        : location
+          ? { type: "location", lat: location.lat, lng: location.lng, reply_to: replyTo }
+          : { type: "text", text, reply_to: replyTo };
 
     let chatMessage: ChatMessage;
     if (file && optimisticUploadMessageId) {

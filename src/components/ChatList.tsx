@@ -33,7 +33,7 @@ function lastMessagePreviewForList(
   currentUserId: string,
   chat: ChatListItem,
 ): string {
-  const text = getMessagePreviewText(lastMessage.content);
+  const text = getMessagePreviewText(lastMessage.content, 50, currentUserId);
   const me = currentUserId.trim().toLowerCase();
   const own =
     lastMessage.isOwn ||
@@ -63,7 +63,12 @@ function isOwnMessage(msg: ChatMessage, currentUserId: string): boolean {
   );
 }
 
-export function ChatList() {
+export type ChatListProps = {
+  /** На нативе: при false отключается WebView pull-to-refresh (чтобы не мешал скроллу открытого чата). */
+  allowNativePullToRefresh?: boolean;
+};
+
+export function ChatList({ allowNativePullToRefresh = true }: ChatListProps) {
   const { user } = useAuthStore();
   const { chats, loadUsers, loadChats, isLoading, error } = useChatStore();
   const ensureConnected = useWebSocketStore((s) => s.ensureConnected);
@@ -86,7 +91,7 @@ export function ChatList() {
     }
   }, [user?.id, loadUsers]);
 
-  useChatListPullToRefresh(!!user, async () => {
+  useChatListPullToRefresh(!!user && allowNativePullToRefresh, async () => {
     if (!user?.id) return;
     await loadChats(user.id, { force: true });
   });

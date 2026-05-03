@@ -1,9 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
-import { Check, Loader2 } from "lucide-react";
+import { Check, Loader2, Phone } from "lucide-react";
 import type { ChatMessage, ReplyTo } from "@/stores/chatStore";
-import { formatMessageClock, getMessagePreviewText } from "@/utils/chatUtils";
+import { formatMeetCallLogLabel, formatMessageClock, getMessagePreviewText } from "@/utils/chatUtils";
 import { MessageBody } from "./ChatMessageBody";
 import {
   getMessageBubbleClassName,
@@ -139,10 +139,28 @@ export function ChatMessageBubble({
 
   const replyToPayload: ReplyTo = {
     id: message.id,
-    preview: getMessagePreviewText(message.content, 50),
+    preview: getMessagePreviewText(message.content, 50, currentUserId),
   };
 
   const clampDrag = (dx: number) => Math.max(-MAX_DRAG_PX, Math.min(MAX_DRAG_PX, dx));
+
+  if (message.content.type === "call_log") {
+    const label = formatMeetCallLogLabel(currentUserId, message.content);
+    return (
+      <div
+        className={
+          `flex justify-center px-3 py-1.5 ` +
+          (dimmed ? "blur-[3px] opacity-[0.4] pointer-events-none transition-[filter,opacity] duration-200" : "")
+        }
+      >
+        <div className="inline-flex max-w-[min(100%,26rem)] items-center gap-2 rounded-full border border-border/55 bg-muted/55 px-3.5 py-1.5 text-center text-[13px] leading-snug text-muted-foreground shadow-sm dark:border-white/12 dark:bg-muted/45">
+          <Phone className="h-3.5 w-3.5 shrink-0 opacity-85" strokeWidth={2.2} aria-hidden />
+          <span>{label}</span>
+          <span className="text-[10px] font-medium tabular-nums opacity-70">{formatMessageClock(message.timestamp)}</span>
+        </div>
+      </div>
+    );
+  }
 
   const clearLongPressTimer = useCallback(() => {
     if (longPressTimerRef.current != null) {
@@ -196,7 +214,7 @@ export function ChatMessageBubble({
         lockedHorizontal: false,
         replyTo: {
           id: m.id,
-          preview: getMessagePreviewText(m.content, 50),
+          preview: getMessagePreviewText(m.content, 50, currentUserId),
         },
       };
       setDragX(0);
@@ -407,6 +425,7 @@ export function ChatMessageBubble({
           immediateMediaLoad={Boolean(anchorBox)}
           messageId={message.id}
           sequencePlayback={interactive}
+          viewerUserId={currentUserId}
         />
         {showFileUploadPercentRing ? (
           <div className="mt-2 flex flex-col items-center gap-1" aria-live="polite">

@@ -90,7 +90,7 @@ function HomeInner() {
         <aside
           className={`relative flex min-h-0 w-full min-w-0 shrink-0 flex-col md:h-full md:pt-14 ${chatListSidebarMd}`}
         >
-          <ChatList />
+          <ChatList allowNativePullToRefresh={!threadOverlayOpen} />
         </aside>
 
         <section className="relative flex min-h-0 min-w-0 flex-1 flex-col">
@@ -102,7 +102,7 @@ function HomeInner() {
 
           {threadOverlayOpen ? (
             <div
-              className="flex min-h-0 flex-1 flex-col bg-background max-md:fixed max-md:inset-0 max-md:z-50 max-md:transition-transform max-md:ease-in-out max-md:will-change-transform md:relative md:z-0 md:translate-x-0 md:transition-none md:will-change-auto"
+              className="flex min-h-0 flex-1 flex-col overscroll-contain bg-background max-md:fixed max-md:inset-0 max-md:z-50 max-md:transition-transform max-md:ease-in-out max-md:will-change-transform md:relative md:z-0 md:translate-x-0 md:transition-none md:will-change-auto"
               style={mobileSlideStyle}
               aria-modal={isWide ? undefined : "true"}
               role="dialog"

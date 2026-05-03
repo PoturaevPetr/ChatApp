@@ -95,7 +95,13 @@ export type StoredMessageContent =
       };
       reply_to?: { id: string; preview: string };
     }
-  | { type: "location"; lat: number; lng: number; reply_to?: { id: string; preview: string } };
+  | { type: "location"; lat: number; lng: number; reply_to?: { id: string; preview: string } }
+  | {
+      type: "call_log";
+      initiated_by: string;
+      outcome: "completed" | "missed" | "declined";
+      duration_sec?: number;
+    };
 
 export interface StoredMessage {
   id: string;

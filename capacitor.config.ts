@@ -15,6 +15,11 @@ const config = {
    */
   android: {
     adjustMarginsForEdgeToEdge: "disable",
+    /**
+     * Иначе WebView блокирует ws:// к MeetService (LAN) при https-«происхождении» приложения
+     * (androidScheme: https) — смешанный контент. В проде лучше wss:// на Meet.
+     */
+    allowMixedContent: true,
   },
   plugins: {
     App: {

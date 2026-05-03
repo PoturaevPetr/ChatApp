@@ -19,6 +19,8 @@ import {
   Users,
   LogOut,
   Pencil,
+  Phone,
+  PhoneOff,
 } from "lucide-react";
 import { AuthGuard } from "@/components/AuthGuard";
 import { Layout } from "@/components/Layout";
@@ -58,6 +60,8 @@ import {
 import { useCaptureModeStore } from "@/stores/captureModeStore";
 import { useVisualViewportKeyboardInset } from "@/hooks/useVisualViewportKeyboardInset";
 import { requestChatOverlayClose } from "@/lib/chatOverlayEvents";
+import { useMeetCall } from "@/contexts/MeetCallContext";
+import { fallbackPeerName } from "@/lib/meetDisplayName";
 import {
   isComposerClipboardContentDismissed,
   markComposerClipboardContentDismissed,
@@ -315,12 +319,6 @@ async function waitForVideoReadyToRecord(video: HTMLVideoElement): Promise<void>
     });
   }
 }
-
-function fallbackPeerName(userId: string): string {
-  const short = String(userId).slice(0, 8);
-  return short ? `Пользователь ${short}` : "Пользователь";
-}
-
 
 export type ChatThreadScreenMode = "standalone" | "embedded";
 
@@ -1019,6 +1017,38 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
   }, [chats, isGroupChatEarly, activeRoomId]);
   const isGroupCreator = !!(user?.id && activeGroupRow && String(activeGroupRow.groupCreatedBy) === String(user.id));
 
+  const meetThreadOk =
+    !!user?.id &&
+    !!threadPeerId &&
+    !isGroupChatEarly &&
+    !!activeChatUser?.id &&
+    !isGroupThreadPeerId(activeChatUser.id);
+  const displayName = activeChatUser?.name ?? "Пользователь";
+  const meetCall = useMeetCall();
+  const meetUiActive = meetThreadOk && (meetCall.meetCallsAvailable || meetCall.configLoading);
+
+  const onMeetPhoneClick = useCallback(() => {
+    const phase = meetCall.snapshot.phase;
+    if (phase === "outgoing_ringing" || phase === "in_call") {
+      meetCall.hangup();
+      return;
+    }
+    const pid = activeChatUser?.id;
+    if (!pid || isGroupThreadPeerId(pid)) return;
+    void meetCall.startCall(pid, activeRoomId ?? null, "audio");
+  }, [meetCall, activeChatUser?.id, activeRoomId]);
+
+  const onMeetVideoClick = useCallback(() => {
+    const phase = meetCall.snapshot.phase;
+    if (phase === "outgoing_ringing" || phase === "in_call") {
+      meetCall.hangup();
+      return;
+    }
+    const pid = activeChatUser?.id;
+    if (!pid || isGroupThreadPeerId(pid)) return;
+    void meetCall.startCall(pid, activeRoomId ?? null, "video");
+  }, [meetCall, activeChatUser?.id, activeRoomId]);
+
   const flushTypingToServer = useCallback(() => {
     if (typingStopTimerRef.current) {
       clearTimeout(typingStopTimerRef.current);
@@ -1633,7 +1663,6 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
     /* Запись не останавливаем по отпусканию — только кнопка «Отправить» в блоке аудио/видео. */
   };
 
-  const displayName = activeChatUser?.name ?? "Пользователь";
   void presenceClock;
   const isGroupChat = isGroupChatEarly;
   const presenceLabel = isGroupChat
@@ -1794,6 +1823,55 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
                   )}
                 </p>
               </div>
+
+              {meetUiActive ? (
+                <span className="flex shrink-0 items-center gap-0.5">
+                  <button
+                    type="button"
+                    onClick={onMeetPhoneClick}
+                    disabled={meetCall.configLoading || meetCall.snapshot.phase === "ws_connecting"}
+                    className="rounded-full p-2 text-muted-foreground hover:bg-white/10 hover:text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 disabled:opacity-40"
+                    aria-label={
+                      meetCall.snapshot.phase === "outgoing_ringing" || meetCall.snapshot.phase === "in_call"
+                        ? "Завершить звонок"
+                        : "Аудиозвонок"
+                    }
+                    title={
+                      meetCall.snapshot.phase === "outgoing_ringing" || meetCall.snapshot.phase === "in_call"
+                        ? "Завершить звонок"
+                        : "Аудиозвонок"
+                    }
+                  >
+                    {meetCall.snapshot.phase === "outgoing_ringing" || meetCall.snapshot.phase === "in_call" ? (
+                      <PhoneOff className="h-5 w-5 text-destructive" aria-hidden />
+                    ) : (
+                      <Phone className="h-5 w-5" aria-hidden />
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onMeetVideoClick}
+                    disabled={meetCall.configLoading || meetCall.snapshot.phase === "ws_connecting"}
+                    className="rounded-full p-2 text-muted-foreground hover:bg-white/10 hover:text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 disabled:opacity-40"
+                    aria-label={
+                      meetCall.snapshot.phase === "outgoing_ringing" || meetCall.snapshot.phase === "in_call"
+                        ? "Завершить звонок"
+                        : "Видеозвонок"
+                    }
+                    title={
+                      meetCall.snapshot.phase === "outgoing_ringing" || meetCall.snapshot.phase === "in_call"
+                        ? "Завершить звонок"
+                        : "Видеозвонок"
+                    }
+                  >
+                    {meetCall.snapshot.phase === "outgoing_ringing" || meetCall.snapshot.phase === "in_call" ? (
+                      <PhoneOff className="h-5 w-5 text-destructive" aria-hidden />
+                    ) : (
+                      <Video className="h-5 w-5" aria-hidden />
+                    )}
+                  </button>
+                </span>
+              ) : null}
 
               <div className="relative shrink-0" data-header-menu-root>
                 <button
@@ -1968,7 +2046,7 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
               onReply={() =>
                 setReplyingTo({
                   id: messageMenu.message.id,
-                  preview: getMessagePreviewText(messageMenu.message.content, 50),
+                  preview: getMessagePreviewText(messageMenu.message.content, 50, user?.id),
                 })
               }
               onDelete={() => {

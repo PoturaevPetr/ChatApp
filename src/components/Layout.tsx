@@ -8,6 +8,7 @@ import { useAuthStore } from "@/stores/authStore";
 import { useChatStore } from "@/stores/chatStore";
 import { useWebSocketStore } from "@/stores/websocketStore";
 import { WebSocketInitializer } from "@/components/WebSocketInitializer";
+import { MeetCallProvider } from "@/contexts/MeetCallContext";
 import { useMediaMinMd } from "@/hooks/useMediaMinMd";
 import { chatListSidebarMd } from "@/lib/chatListSidebar";
 
@@ -37,6 +38,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const homeSplitHeader = isChatsListPage && isWide;
 
   return (
+    <MeetCallProvider>
     <div className="relative flex h-full min-h-0 flex-col bg-background">
       <WebSocketInitializer />
       {!hideTopBar ? (
@@ -179,5 +181,6 @@ export function Layout({ children }: { children: React.ReactNode }) {
         {children}
       </main>
     </div>
+    </MeetCallProvider>
   );
 }

@@ -1,5 +1,6 @@
 import { format, isToday, isYesterday } from "date-fns";
 import { ru } from "date-fns/locale";
+import type { ChatMessageContent, MeetCallLogPayload } from "@/stores/chatStore";
 
 export function formatMessageTime(timestamp: string): string {
   try {
@@ -34,13 +35,52 @@ export function formatChatDate(timestamp: string): string {
   }
 }
 
+function formatCallDurationSec(sec: number): string {
+  const s = Math.max(0, Math.floor(sec));
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  if (m <= 0) return `${r} с`;
+  return `${m}:${r.toString().padStart(2, "0")}`;
+}
+
+/** Подпись строки журнала звонка в чате (зависит от того, кто смотрит ленту). */
+export function formatMeetCallLogLabel(viewerId: string | null | undefined, content: MeetCallLogPayload): string {
+  const me = (viewerId ?? "").trim().toLowerCase();
+  const initiator = (content.initiated_by ?? "").trim().toLowerCase();
+  const iStarted = me.length > 0 && initiator === me;
+  const dur =
+    content.duration_sec != null && Number.isFinite(content.duration_sec)
+      ? ` · ${formatCallDurationSec(content.duration_sec)}`
+      : "";
+
+  if (content.outcome === "declined") {
+    if (iStarted) return `Исходящий звонок · отклонён`;
+    return `Входящий звонок · отклонён`;
+  }
+  if (content.outcome === "missed") {
+    if (iStarted) return `Исходящий звонок`;
+    return `Пропущенный звонок`;
+  }
+  if (content.outcome === "completed") {
+    if (iStarted) return `Исходящий звонок${dur}`;
+    return `Входящий звонок${dur}`;
+  }
+  return "Звонок";
+}
+
 export function getMessagePreviewText(
   content:
     | { type: string; text?: string; file?: { name: string; mimeType?: string }; lat?: number; lng?: number }
     | string,
-  maxLength = 50
+  maxLength = 50,
+  viewerId?: string | null,
 ): string {
   if (typeof content === "string") return content.length <= maxLength ? content : content.slice(0, maxLength) + "...";
+  if (content?.type === "call_log") {
+    const c = content as ChatMessageContent & { type: "call_log" };
+    const label = formatMeetCallLogLabel(viewerId, c);
+    return label.length <= maxLength ? label : label.slice(0, maxLength) + "...";
+  }
   if (content?.type === "location") return "Геопозиция";
   if (content?.type === "file" && content.file) {
     const mime = content.file.mimeType ?? "";
@@ -71,7 +111,17 @@ export function getMessagePlainText(content: {
   file?: { name: string; mimeType?: string };
   lat?: number;
   lng?: number;
+  initiated_by?: string;
+  outcome?: string;
+  duration_sec?: number;
 }): string {
+  if (content?.type === "call_log" && content.outcome) {
+    return formatMeetCallLogLabel(undefined, {
+      initiated_by: String(content.initiated_by ?? ""),
+      outcome: content.outcome as MeetCallLogPayload["outcome"],
+      duration_sec: content.duration_sec,
+    });
+  }
   if (content?.type === "location" && typeof content.lat === "number" && typeof content.lng === "number") {
     return `Геопозиция: ${content.lat.toFixed(6)}, ${content.lng.toFixed(6)}`;
   }

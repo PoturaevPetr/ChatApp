@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import { createPortal } from "react-dom";
 import type { ChatMessageContent, ChatMessageFile } from "@/stores/chatStore";
-import { createImagePreview } from "@/utils/chatUtils";
+import { createImagePreview, formatMeetCallLogLabel } from "@/utils/chatUtils";
 import { MessageTextWithLinks } from "./MessageTextWithLinks";
 import { getValidAuthTokens } from "@/lib/validAuthToken";
 import {
@@ -1894,6 +1894,7 @@ export function MessageBody({
   immediateMediaLoad = false,
   messageId,
   sequencePlayback = false,
+  viewerUserId,
 }: {
   content: ChatMessageContent;
   isOwn: boolean;
@@ -1902,6 +1903,8 @@ export function MessageBody({
   immediateMediaLoad?: boolean;
   messageId?: string;
   sequencePlayback?: boolean;
+  /** Для подписи журнала звонка (call_log). */
+  viewerUserId?: string | null;
 }) {
   const replyTo = "reply_to" in content ? content.reply_to : undefined;
   const main =
@@ -1909,6 +1912,14 @@ export function MessageBody({
       <MessageTextWithLinks text={content.text || ""} isOwn={isOwn} />
     ) : content.type === "location" ? (
       <LocationMessageBlock lat={content.lat} lng={content.lng} isOwn={isOwn} />
+    ) : content.type === "call_log" ? (
+      <span className="text-[13px] leading-snug text-muted-foreground">
+        {formatMeetCallLogLabel(viewerUserId, {
+          initiated_by: content.initiated_by,
+          outcome: content.outcome,
+          duration_sec: content.duration_sec,
+        })}
+      </span>
     ) : (
       (() => {
         const { file, text } = content;
