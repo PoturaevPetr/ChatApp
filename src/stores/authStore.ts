@@ -13,7 +13,12 @@ import {
   setChatKeysForUser,
   type StoredUser,
 } from "@/lib/secureStorage";
-import { chatAuthApi, ChatAuthApiError, type MeResponse } from "@/services/chatAuthApi";
+import {
+  chatAuthApi,
+  ChatAuthApiError,
+  type MeResponse,
+  type OAuthExchangeResponse,
+} from "@/services/chatAuthApi";
 import { getMyKeypair } from "@/services/chatKeysApi";
 import { useChatStore } from "@/stores/chatStore";
 import { syncPushWithBackend } from "@/lib/pushNotifications";
@@ -56,6 +61,8 @@ interface AuthState {
   error: string | null;
   initialize: () => Promise<void>;
   login: (username: string, password?: string) => Promise<void>;
+  /** Завершение входа после OAuth (код уже обменян на бэкенде). */
+  completeOAuthLogin: (payload: OAuthExchangeResponse) => Promise<void>;
   register: (data: RegisterData) => Promise<void>;
   logout: () => Promise<void>;
   clearError: () => void;
@@ -146,6 +153,66 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           refresh_token: res.refresh_token,
         },
         keys ?? undefined
+      );
+      set({
+        user: enriched,
+        isAuthenticated: true,
+        isLoading: false,
+        error: null,
+      });
+      void syncPushWithBackend().catch(() => {});
+    } catch (e) {
+      const message =
+        e instanceof ChatAuthApiError
+          ? e.detail || e.message
+          : e instanceof Error
+            ? e.message
+            : "Ошибка входа";
+      set({
+        error: message,
+        isLoading: false,
+        isAuthenticated: false,
+      });
+      throw e;
+    }
+  },
+
+  completeOAuthLogin: async (payload: OAuthExchangeResponse) => {
+    set({ isLoading: true, error: null });
+    try {
+      const user: StoredUser = {
+        id: String(payload.user_id),
+        name: payload.username,
+      };
+      const enriched = await fetchStoredUserProfile(payload.access_token, user);
+      if (payload.is_new_user && payload.public_key && payload.private_key) {
+        await setChatKeysForUser(String(payload.user_id), {
+          public_key: payload.public_key,
+          private_key: payload.private_key,
+        });
+      } else {
+        let keys = await getChatKeysForUser(String(payload.user_id));
+        if (!keys?.private_key) {
+          try {
+            const keypair = await getMyKeypair(payload.access_token);
+            keys = {
+              public_key: keypair.public_key,
+              private_key: keypair.private_key,
+            };
+            await setChatKeysForUser(String(payload.user_id), keys);
+          } catch {
+            /* как при обычном логине — без ключей на сервере */
+          }
+        }
+      }
+      const keysForSession = await getChatKeysForUser(String(payload.user_id));
+      await setAuthWithTokens(
+        enriched,
+        {
+          access_token: payload.access_token,
+          refresh_token: payload.refresh_token,
+        },
+        keysForSession ?? undefined
       );
       set({
         user: enriched,

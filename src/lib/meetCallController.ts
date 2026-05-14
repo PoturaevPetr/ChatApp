@@ -396,6 +396,15 @@ export class MeetCallController {
    * Включить или выключить локальную камеру в разговоре.
    * При первом включении после аудио — renegotiation (новый offer/answer).
    */
+  /** Вкл/выкл локальный микрофон (трек остаётся, передача аудио отключается). */
+  setLocalMicEnabled(enabled: boolean): void {
+    if (this.snap.phase !== "in_call" || !this.localStream) return;
+    for (const t of this.localStream.getAudioTracks()) {
+      t.enabled = enabled;
+    }
+    this.push({ localStream: this.localStream });
+  }
+
   async setLocalCameraEnabled(enabled: boolean): Promise<void> {
     if (this.snap.phase !== "in_call" || !this.pc || !this.localStream) return;
     const vt = this.localStream.getVideoTracks()[0];

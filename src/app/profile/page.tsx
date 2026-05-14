@@ -15,6 +15,7 @@ import { ProfileEditModal } from "@/components/ProfileEditModal";
 import { fileToAvatarDataUrl } from "@/lib/avatarImage";
 import { Capacitor } from "@capacitor/core";
 import { App } from "@capacitor/app";
+import { useMediaMinMd } from "@/hooks/useMediaMinMd";
 
 function getInitials(name: string): string {
   const s = (name || "").trim();
@@ -80,6 +81,7 @@ function meToProfile(me: {
 }
 
 export default function ProfilePage() {
+  const isDesktopLayout = useMediaMinMd();
   const { user, logout, updateUser } = useAuthStore();
   const router = useRouter();
   const [profile, setProfile] = useState<ProfileDisplay | null>(null);
@@ -202,88 +204,153 @@ export default function ProfilePage() {
               )}
 
               {user && !loading && (
-                <>
-                  <div className="flex flex-col items-center text-center mb-8">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAvatarError(null);
-                        avatarGalleryInputRef.current?.click();
-                      }}
-                      className="relative w-24 h-24 rounded-full overflow-hidden bg-primary/20 text-primary flex items-center justify-center font-medium text-3xl mb-4 ring-offset-background focus:outline-none focus:ring-2 focus:ring-primary/50 focus:ring-offset-2"
-                      aria-label="Выбрать фото из галереи"
-                      title="Выбрать фото из галереи"
+                <div
+                  className={
+                    isDesktopLayout
+                      ? "mx-auto w-full max-w-3xl rounded-2xl border border-border bg-card/40 p-8 shadow-sm backdrop-blur-sm"
+                      : "mx-auto w-full max-w-lg"
+                  }
+                >
+                  <div
+                    className={
+                      isDesktopLayout
+                        ? "flex flex-row items-start gap-10"
+                        : "flex flex-col items-center"
+                    }
+                  >
+                    <div
+                      className={
+                        isDesktopLayout
+                          ? "flex shrink-0 flex-col items-center pt-1"
+                          : "mb-8 flex flex-col items-center text-center"
+                      }
                     >
-                      {profile?.avatar ?? user.avatar ? (
-                        <NextImage
-                          src={(profile?.avatar ?? user.avatar) as string}
-                          alt=""
-                          width={96}
-                          height={96}
-                          className="h-full w-full object-cover"
-                          unoptimized
-                        />
-                      ) : (
-                        getInitials(displayName)
-                      )}
-                      {isUploadingAvatar ? (
-                        <span className="absolute inset-0 flex items-center justify-center bg-black/35">
-                          <Loader2 className="w-8 h-8 animate-spin text-white" />
-                        </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAvatarError(null);
+                          avatarGalleryInputRef.current?.click();
+                        }}
+                        className={
+                          isDesktopLayout
+                            ? "relative mb-0 flex h-36 w-36 items-center justify-center overflow-hidden rounded-full bg-primary/20 text-4xl font-medium text-primary ring-offset-background focus:outline-none focus:ring-2 focus:ring-primary/50 focus:ring-offset-2"
+                            : "relative mb-4 flex h-24 w-24 items-center justify-center overflow-hidden rounded-full bg-primary/20 text-3xl font-medium text-primary ring-offset-background focus:outline-none focus:ring-2 focus:ring-primary/50 focus:ring-offset-2"
+                        }
+                        aria-label="Выбрать фото из галереи"
+                        title="Выбрать фото из галереи"
+                      >
+                        {profile?.avatar ?? user.avatar ? (
+                          <NextImage
+                            src={(profile?.avatar ?? user.avatar) as string}
+                            alt=""
+                            width={144}
+                            height={144}
+                            className="h-full w-full object-cover"
+                            unoptimized
+                          />
+                        ) : (
+                          getInitials(displayName)
+                        )}
+                        {isUploadingAvatar ? (
+                          <span className="absolute inset-0 flex items-center justify-center bg-black/35">
+                            <Loader2 className="h-8 w-8 animate-spin text-white" />
+                          </span>
+                        ) : null}
+                      </button>
+                      {!isDesktopLayout ? (
+                        <>
+                          <h2 className="text-xl font-semibold text-foreground">{displayName}</h2>
+                          <p className="mt-0.5 text-sm text-muted-foreground">Ваш профиль</p>
+                        </>
                       ) : null}
-                    </button>
-                    <h2 className="text-xl font-semibold text-foreground">{displayName}</h2>
-                    <p className="text-sm mt-0.5 text-muted-foreground">Ваш профиль</p>
+                    </div>
+
+                    <div
+                      className={
+                        isDesktopLayout
+                          ? "min-w-0 flex-1 flex flex-col text-left"
+                          : "w-full flex flex-col items-stretch text-center"
+                      }
+                    >
+                      {isDesktopLayout ? (
+                        <div className="mb-5">
+                          <h2 className="text-2xl font-semibold tracking-tight text-foreground">{displayName}</h2>
+                          <p className="mt-1 text-sm text-muted-foreground">Ваш профиль</p>
+                        </div>
+                      ) : null}
+
+                      {avatarError ? (
+                        <p
+                          className={
+                            isDesktopLayout
+                              ? "text-destructive mb-4 text-sm"
+                              : "text-destructive -mt-4 mb-6 text-sm"
+                          }
+                        >
+                          {avatarError}
+                        </p>
+                      ) : null}
+
+                      <button
+                        type="button"
+                        onClick={() => profile && setShowEditProfileModal(true)}
+                        disabled={!profile}
+                        className={
+                          isDesktopLayout
+                            ? "mb-3 flex w-full max-w-md items-center justify-center gap-2 rounded-xl bg-primary py-3 font-medium text-primary-foreground hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-primary/50 disabled:opacity-50"
+                            : "mx-auto mb-2 flex w-full max-w-sm items-center justify-center gap-2 rounded-xl bg-primary py-3 font-medium text-primary-foreground hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-primary/50 disabled:opacity-50"
+                        }
+                      >
+                        <Pencil size={18} aria-hidden />
+                        Изменить данные
+                      </button>
+
+                      {profile?.birth_date ? (
+                        <div className={isDesktopLayout ? "mt-2 space-y-2" : "mt-5 space-y-2"}>
+                          <p className="text-sm text-muted-foreground">
+                            Дата рождения: {formatBirthDateWithAge(profile.birth_date)}
+                          </p>
+                        </div>
+                      ) : null}
+
+                      {hasChatKeys === false ? (
+                        <div className="mt-5 rounded-xl border border-amber-500/50 bg-amber-500/10 p-4 text-sm text-foreground">
+                          <p className="font-medium text-amber-700 dark:text-amber-400">Нет ключей для чата</p>
+                          <p className="mt-1 text-muted-foreground">
+                            Ключи шифрования создаются при регистрации в этом приложении. Без них нельзя расшифровать сообщения. Войдите на устройстве, где регистрировались, или зарегистрируйтесь заново.
+                          </p>
+                        </div>
+                      ) : null}
+
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setShowLogoutModal(true);
+                        }}
+                        className={
+                          isDesktopLayout
+                            ? "mt-6 flex w-full max-w-md items-center justify-center gap-2 rounded-xl border border-border bg-muted/25 px-4 py-3 text-muted-foreground transition-colors hover:bg-muted/45"
+                            : "mt-6 flex w-full items-center justify-center gap-2 rounded-xl border border-border bg-muted/25 px-4 py-3 text-muted-foreground transition-colors hover:bg-muted/45"
+                        }
+                      >
+                        <LogOut size={20} />
+                        <span>Выйти</span>
+                      </button>
+
+                      <p
+                        className={
+                          isDesktopLayout
+                            ? "mt-6 text-left text-xs text-muted-foreground"
+                            : "mt-6 text-center text-xs text-muted-foreground"
+                        }
+                      >
+                        {appVersionText || "Версия приложения"}
+                      </p>
+                    </div>
                   </div>
-
-                  {avatarError ? (
-                    <p className="text-destructive text-sm text-center -mt-4 mb-6">{avatarError}</p>
-                  ) : null}
-
-                  <button
-                    type="button"
-                    onClick={() => profile && setShowEditProfileModal(true)}
-                    disabled={!profile}
-                    className="mx-auto mb-2 flex w-full max-w-sm items-center justify-center gap-2 rounded-xl bg-primary py-3 font-medium text-primary-foreground hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-primary/50 disabled:opacity-50"
-                  >
-                    <Pencil size={18} aria-hidden />
-                    Изменить данные
-                  </button>
-
-                  {profile?.birth_date ? (
-                    <div className="mt-5 space-y-2">
-                      <p className="text-sm text-muted-foreground">
-                        Дата рождения: {formatBirthDateWithAge(profile.birth_date)}
-                      </p>
-                    </div>
-                  ) : null}
-
-                  {hasChatKeys === false ? (
-                    <div className="mt-5 rounded-xl border border-amber-500/50 bg-amber-500/10 p-4 text-sm text-foreground">
-                      <p className="font-medium text-amber-700 dark:text-amber-400">Нет ключей для чата</p>
-                      <p className="mt-1 text-muted-foreground">
-                        Ключи шифрования создаются при регистрации в этом приложении. Без них нельзя расшифровать сообщения. Войдите на устройстве, где регистрировались, или зарегистрируйтесь заново.
-                      </p>
-                    </div>
-                  ) : null}
-
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      setShowLogoutModal(true);
-                    }}
-                    className="mt-6 flex w-full items-center justify-center gap-2 rounded-xl border border-border bg-muted/25 px-4 py-3 text-muted-foreground hover:bg-muted/45 transition-colors"
-                  >
-                    <LogOut size={20} />
-                    <span>Выйти</span>
-                  </button>
-
-                  <p className="mt-6 text-center text-xs text-muted-foreground">
-                    {appVersionText || "Версия приложения"}
-                  </p>
-                </>
+                </div>
               )}
             </div>
           </div>

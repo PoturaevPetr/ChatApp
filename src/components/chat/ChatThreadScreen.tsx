@@ -9,6 +9,7 @@ import {
   Loader2,
   Paperclip,
   XCircle,
+  X,
   Mic,
   Video,
   ArrowDown,
@@ -375,6 +376,8 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
   /** Короткий тап по кнопке микрофона/камеры: режим захвата. Удержание — запись. (persist: zustand + Preferences/localStorage) */
   const captureMode = useCaptureModeStore((s) => s.captureMode);
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
+  /** Краткое сообщение при недоступности Meet (клик по кнопкам звонка). */
+  const [meetCallNotice, setMeetCallNotice] = useState<string | null>(null);
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [isDeletingChat, setIsDeletingChat] = useState(false);
   const [leaveGroupModalOpen, setLeaveGroupModalOpen] = useState(false);
@@ -1025,7 +1028,21 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
     !isGroupThreadPeerId(activeChatUser.id);
   const displayName = activeChatUser?.name ?? "Пользователь";
   const meetCall = useMeetCall();
-  const meetUiActive = meetThreadOk && (meetCall.meetCallsAvailable || meetCall.configLoading);
+  const canStartMeetCall =
+    meetThreadOk &&
+    meetCall.meetCallsAvailable &&
+    !meetCall.configLoading &&
+    !(meetCall.configError?.trim());
+
+  useEffect(() => {
+    if (!meetCallNotice) return;
+    const id = window.setTimeout(() => setMeetCallNotice(null), 5200);
+    return () => window.clearTimeout(id);
+  }, [meetCallNotice]);
+
+  const showMeetCallUnavailableNotice = useCallback(() => {
+    setMeetCallNotice("Нет связи с сервером");
+  }, []);
 
   const onMeetPhoneClick = useCallback(() => {
     const phase = meetCall.snapshot.phase;
@@ -1033,10 +1050,15 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
       meetCall.hangup();
       return;
     }
+    if (meetCall.configLoading || phase === "ws_connecting") return;
+    if (!canStartMeetCall) {
+      showMeetCallUnavailableNotice();
+      return;
+    }
     const pid = activeChatUser?.id;
     if (!pid || isGroupThreadPeerId(pid)) return;
     void meetCall.startCall(pid, activeRoomId ?? null, "audio");
-  }, [meetCall, activeChatUser?.id, activeRoomId]);
+  }, [meetCall, activeChatUser?.id, activeRoomId, canStartMeetCall, showMeetCallUnavailableNotice]);
 
   const onMeetVideoClick = useCallback(() => {
     const phase = meetCall.snapshot.phase;
@@ -1044,10 +1066,15 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
       meetCall.hangup();
       return;
     }
+    if (meetCall.configLoading || phase === "ws_connecting") return;
+    if (!canStartMeetCall) {
+      showMeetCallUnavailableNotice();
+      return;
+    }
     const pid = activeChatUser?.id;
     if (!pid || isGroupThreadPeerId(pid)) return;
     void meetCall.startCall(pid, activeRoomId ?? null, "video");
-  }, [meetCall, activeChatUser?.id, activeRoomId]);
+  }, [meetCall, activeChatUser?.id, activeRoomId, canStartMeetCall, showMeetCallUnavailableNotice]);
 
   const flushTypingToServer = useCallback(() => {
     if (typingStopTimerRef.current) {
@@ -1734,6 +1761,15 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
     }
   };
 
+  const meetCallPhase = meetCall.snapshot.phase;
+  const inActiveMeetCall =
+    meetThreadOk && (meetCallPhase === "outgoing_ringing" || meetCallPhase === "in_call");
+  const dimMeetCallHeaderButtons =
+    meetThreadOk &&
+    !inActiveMeetCall &&
+    !canStartMeetCall &&
+    !(meetCall.configLoading || meetCallPhase === "ws_connecting");
+
   const threadUi = (
         <div
           ref={threadShellRef}
@@ -1824,22 +1860,26 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
                 </p>
               </div>
 
-              {meetUiActive ? (
+              {meetThreadOk ? (
                 <span className="flex shrink-0 items-center gap-0.5">
                   <button
                     type="button"
                     onClick={onMeetPhoneClick}
                     disabled={meetCall.configLoading || meetCall.snapshot.phase === "ws_connecting"}
-                    className="rounded-full p-2 text-muted-foreground hover:bg-white/10 hover:text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 disabled:opacity-40"
+                    className={`rounded-full p-2 text-muted-foreground hover:bg-white/10 hover:text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 disabled:opacity-40 ${dimMeetCallHeaderButtons ? "cursor-pointer opacity-[0.42]" : ""}`}
                     aria-label={
                       meetCall.snapshot.phase === "outgoing_ringing" || meetCall.snapshot.phase === "in_call"
                         ? "Завершить звонок"
-                        : "Аудиозвонок"
+                        : dimMeetCallHeaderButtons
+                          ? "Аудиозвонок недоступен, нажмите для пояснения"
+                          : "Аудиозвонок"
                     }
                     title={
                       meetCall.snapshot.phase === "outgoing_ringing" || meetCall.snapshot.phase === "in_call"
                         ? "Завершить звонок"
-                        : "Аудиозвонок"
+                        : dimMeetCallHeaderButtons
+                          ? "Нет связи с сервисом звонков — нажмите для пояснения"
+                          : "Аудиозвонок"
                     }
                   >
                     {meetCall.snapshot.phase === "outgoing_ringing" || meetCall.snapshot.phase === "in_call" ? (
@@ -1852,16 +1892,20 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
                     type="button"
                     onClick={onMeetVideoClick}
                     disabled={meetCall.configLoading || meetCall.snapshot.phase === "ws_connecting"}
-                    className="rounded-full p-2 text-muted-foreground hover:bg-white/10 hover:text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 disabled:opacity-40"
+                    className={`rounded-full p-2 text-muted-foreground hover:bg-white/10 hover:text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 disabled:opacity-40 ${dimMeetCallHeaderButtons ? "cursor-pointer opacity-[0.42]" : ""}`}
                     aria-label={
                       meetCall.snapshot.phase === "outgoing_ringing" || meetCall.snapshot.phase === "in_call"
                         ? "Завершить звонок"
-                        : "Видеозвонок"
+                        : dimMeetCallHeaderButtons
+                          ? "Видеозвонок недоступен, нажмите для пояснения"
+                          : "Видеозвонок"
                     }
                     title={
                       meetCall.snapshot.phase === "outgoing_ringing" || meetCall.snapshot.phase === "in_call"
                         ? "Завершить звонок"
-                        : "Видеозвонок"
+                        : dimMeetCallHeaderButtons
+                          ? "Нет связи с сервисом звонков — нажмите для пояснения"
+                          : "Видеозвонок"
                     }
                   >
                     {meetCall.snapshot.phase === "outgoing_ringing" || meetCall.snapshot.phase === "in_call" ? (
@@ -1953,6 +1997,23 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
               </div>
             </div>
           </header>
+
+          {meetCallNotice && meetThreadOk ? (
+            <div
+              role="alert"
+              className="pointer-events-auto relative z-20 mx-3 mt-14 mb-2 shrink-0 flex items-start gap-2 rounded-lg border border-amber-500/45 bg-amber-500/18 px-3 py-2.5 text-sm leading-snug text-amber-950 shadow-lg backdrop-blur-md dark:border-amber-400/35 dark:bg-amber-950/50 dark:text-amber-50 md:mt-0"
+            >
+              <span className="min-w-0 flex-1">{meetCallNotice}</span>
+              <button
+                type="button"
+                onClick={() => setMeetCallNotice(null)}
+                className="shrink-0 rounded-md p-1 text-amber-900/80 hover:bg-black/10 focus:outline-none focus:ring-2 focus:ring-amber-600/40 dark:text-amber-100/90 dark:hover:bg-white/10"
+                aria-label="Закрыть"
+              >
+                <X className="h-4 w-4" aria-hidden />
+              </button>
+            </div>
+          ) : null}
 
           {deleteModalOpen ? (
             <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
@@ -2137,7 +2198,9 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
                 if (emojiKeyboardOpen) setEmojiKeyboardOpen(false);
                 if (messageMenu) setMessageMenu(null);
               }}
-              className="no-scrollbar relative z-10 h-full overflow-y-auto overscroll-contain px-5 pt-14 md:pt-0 sm:px-7"
+              className={`no-scrollbar relative z-10 h-full overflow-y-auto overscroll-contain px-5 sm:px-7 ${
+                meetCallNotice && meetThreadOk ? "pt-3 md:pt-2" : "pt-14 md:pt-0"
+              }`}
               style={{
                 paddingBottom: emojiKeyboardOpen
                   ? `calc(5rem + min(40dvh, 320px) + env(safe-area-inset-bottom, 0px) + ${keyboardInset}px)`

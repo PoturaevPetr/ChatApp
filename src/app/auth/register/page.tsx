@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { MessageCircle, Loader2, ArrowLeft, ArrowRight, Eye, EyeOff } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
+import { OAuthSocialButtons } from "@/components/OAuthSocialButtons";
 
 type Step = 1 | 2;
 
@@ -137,7 +138,17 @@ export default function RegisterPage() {
         </div>
 
         {step === 1 ? (
-          <form onSubmit={handleContinue} className="space-y-4">
+          <>
+            <OAuthSocialButtons />
+            <div className="relative py-2">
+              <div className="absolute inset-0 flex items-center" aria-hidden>
+                <span className="w-full border-t border-border" />
+              </div>
+              <div className="relative flex justify-center text-xs uppercase">
+                <span className="bg-background px-2 text-muted-foreground">или форма</span>
+              </div>
+            </div>
+            <form onSubmit={handleContinue} className="space-y-4">
             <div>
               <label htmlFor="lastName" className="block text-sm font-medium text-foreground mb-1">
                 Фамилия
@@ -205,6 +216,7 @@ export default function RegisterPage() {
               <ArrowRight size={20} />
             </button>
           </form>
+          </>
         ) : (
           <form onSubmit={handleRegister} className="space-y-4">
             {error && (

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { MessageCircle, Loader2, ArrowLeft, Eye, EyeOff } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
+import { OAuthSocialButtons } from "@/components/OAuthSocialButtons";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -68,6 +69,16 @@ export default function LoginPage() {
           </div>
           <h1 className="text-2xl font-bold text-foreground">Вход</h1>
           <p className="mt-2 text-muted-foreground">Войдите в аккаунт</p>
+        </div>
+
+        <OAuthSocialButtons className="pb-2" />
+        <div className="relative py-2">
+          <div className="absolute inset-0 flex items-center" aria-hidden>
+            <span className="w-full border-t border-border" />
+          </div>
+          <div className="relative flex justify-center text-xs uppercase">
+            <span className="bg-background px-2 text-muted-foreground">или логин</span>
+          </div>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">

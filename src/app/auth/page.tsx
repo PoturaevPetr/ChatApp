@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { MessageCircle, LogIn, UserPlus } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
+import { OAuthSocialButtons } from "@/components/OAuthSocialButtons";
 
 export default function AuthPage() {
   const router = useRouter();
@@ -42,7 +43,16 @@ export default function AuthPage() {
             <MessageCircle size={32} />
           </div>
           <h1 className="text-2xl font-bold text-foreground">Kindred</h1>
-          <p className="mt-2 text-muted-foreground">Выберите действие</p>
+        </div>
+
+        <OAuthSocialButtons />
+        <div className="relative py-2">
+          <div className="absolute inset-0 flex items-center" aria-hidden>
+            <span className="w-full border-t border-border" />
+          </div>
+          <div className="relative flex justify-center text-xs uppercase">
+            <span className="bg-background px-2 text-muted-foreground">или</span>
+          </div>
         </div>
 
         <div className="space-y-3">

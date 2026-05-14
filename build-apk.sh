@@ -12,8 +12,8 @@ APK_OUT_NAME="Kindred.apk"
 # Укажите те же major.minor.patch, что при загрузке APK в админке релизов ChatService.
 # versionCode — целое, должно расти с каждой публикацией (магазин / устройство сравнивают коды).
 # Пример разбора для 1.6.6: 1*10000 + 6*100 + 6 = 10606.
-APP_VERSION_NAME="1.8.2"
-APP_VERSION_CODE=10802
+APP_VERSION_NAME="1.11.6"
+APP_VERSION_CODE=101106
 
 echo "🔧 Сборка APK: $APP_NAME"
 echo "   Проект: $PROJECT_DIR"
@@ -86,6 +86,19 @@ if [ -f "$GRADLE_FILE" ]; then
 else
   echo "❌ Не найден $GRADLE_FILE"
   exit 1
+fi
+
+# Подпись release: keystore.properties и release-signing.gradle в корне ChatApp (папка android после cap sync новая).
+SIGNING_SRC="$PROJECT_DIR/release-signing.gradle"
+SIGNING_DST="$PROJECT_DIR/android/app/release-signing.gradle"
+if [ -f "$SIGNING_SRC" ]; then
+  cp "$SIGNING_SRC" "$SIGNING_DST"
+  if ! grep -q "apply from: 'release-signing.gradle'" "$GRADLE_FILE"; then
+    printf "\napply from: 'release-signing.gradle'\n" >> "$GRADLE_FILE"
+    echo "🔐 Подключён release-signing.gradle (пароли: keystore.properties в корне ChatApp)."
+  fi
+else
+  echo "⚠️  Нет $SIGNING_SRC — релизная подпись Gradle не подключится."
 fi
 
 # После cap sync тема запуска может снова ссылаться на @drawable/splash — возвращаем белый splash + иконка по центру.
@@ -190,14 +203,30 @@ if [ -f "android/gradle/wrapper/gradle-wrapper.properties" ]; then
     sed -i.bak 's/-all\.zip/-bin.zip/g' android/gradle/wrapper/gradle-wrapper.properties 2>/dev/null || true
 fi
 
-# Сборка APK
-echo "🏗 Сборка debug APK..."
+# Сборка APK: по умолчанию debug; релиз — BUILD_RELEASE=1 и keystore.properties в корне ChatApp
+KEYSTORE_PROPS="$PROJECT_DIR/keystore.properties"
+if [ "${BUILD_RELEASE:-0}" = "1" ]; then
+  if [ ! -f "$KEYSTORE_PROPS" ]; then
+    echo "❌ BUILD_RELEASE=1: нет $KEYSTORE_PROPS"
+    echo "   Скопируйте keystore.properties.example → keystore.properties в корне ChatApp и заполните пароли."
+    exit 1
+  fi
+  echo "🏗 Сборка release APK (подпись из корня: keystore.properties)..."
+  GRADLE_TASK="assembleRelease"
+  APK_PATH_REL="app/build/outputs/apk/release/app-release.apk"
+  APK_OUT_NAME="Kindred-release.apk"
+else
+  echo "🏗 Сборка debug APK..."
+  GRADLE_TASK="assembleDebug"
+  APK_PATH_REL="app/build/outputs/apk/debug/app-debug.apk"
+fi
+
 cd android
 chmod +x ./gradlew
 ./gradlew clean
-./gradlew assembleDebug --no-daemon
+./gradlew "$GRADLE_TASK" --no-daemon
 
-APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
+APK_PATH="$APK_PATH_REL"
 if [ -f "$APK_PATH" ]; then
     echo "✅ APK собран: $APK_PATH"
     cp "$APK_PATH" "$PROJECT_DIR/$APK_OUT_NAME"

@@ -52,6 +52,35 @@ export interface RefreshTokenResponse {
   refresh_token: string;
 }
 
+export type OAuthProviderId = "google" | "yandex" | "vk";
+
+export interface OAuthProvidersResponse {
+  google: boolean;
+  yandex: boolean;
+  vk: boolean;
+}
+
+export interface OAuthAuthorizeUrlResponse {
+  authorization_url: string;
+}
+
+export interface OAuthExchangeRequest {
+  provider: OAuthProviderId;
+  code: string;
+  redirect_uri: string;
+  service_id?: string;
+}
+
+export interface OAuthExchangeResponse {
+  access_token: string;
+  refresh_token: string;
+  user_id: string;
+  username: string;
+  is_new_user: boolean;
+  public_key?: string;
+  private_key?: string;
+}
+
 /** Ответ GET /auth/me — текущий пользователь */
 export interface MeResponse {
   id?: string;
@@ -110,6 +139,17 @@ async function request<T>(path: string, options: { method: string; body?: Record
   return data as T;
 }
 
+async function getJson<T>(path: string): Promise<T> {
+  const url = `${BASE_URL.replace(/\/$/, "")}${path}`;
+  const res = await fetch(url, { method: "GET" });
+  const data = await res.json().catch(() => ({}));
+  const detail = typeof (data as { detail?: string }).detail === "string" ? (data as { detail: string }).detail : undefined;
+  if (!res.ok) {
+    throw new ChatAuthApiError(detail || res.statusText || `HTTP ${res.status}`, res.status, detail);
+  }
+  return data as T;
+}
+
 async function authRequest<T>(path: string, accessToken: string): Promise<T> {
   const url = `${BASE_URL.replace(/\/$/, "")}${path}`;
   const res = await fetch(url, {
@@ -156,6 +196,32 @@ export const chatAuthApi = {
   },
 
   /** Обновление данных пользователя. POST /auth/update */
+  async oauthProviders(): Promise<OAuthProvidersResponse> {
+    return getJson<OAuthProvidersResponse>("/api/v1/auth/oauth/providers");
+  },
+
+  async getOAuthAuthorizeUrl(provider: OAuthProviderId, redirectUri: string, state: string): Promise<OAuthAuthorizeUrlResponse> {
+    const q = new URLSearchParams({
+      provider,
+      redirect_uri: redirectUri,
+      state,
+    });
+    return getJson<OAuthAuthorizeUrlResponse>(`/api/v1/auth/oauth/authorize-url?${q.toString()}`);
+  },
+
+  async oauthExchange(body: OAuthExchangeRequest): Promise<OAuthExchangeResponse> {
+    const payload: Record<string, unknown> = {
+      provider: body.provider,
+      code: body.code,
+      redirect_uri: body.redirect_uri,
+      service_id: body.service_id ?? SERVICE_ID,
+    };
+    return request<OAuthExchangeResponse>("/api/v1/auth/oauth/exchange", {
+      method: "POST",
+      body: payload,
+    });
+  },
+
   async updateMe(accessToken: string, data: UpdateMeRequest): Promise<MeResponse> {
     const url = `${BASE_URL.replace(/\/$/, "")}/api/v1/auth/update`;
     const res = await fetch(url, {

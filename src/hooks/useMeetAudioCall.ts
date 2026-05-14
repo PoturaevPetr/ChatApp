@@ -127,6 +127,10 @@ export function useMeetAudioCall(
     await ctrlRef.current?.setLocalCameraEnabled(enabled);
   }, []);
 
+  const setLocalMicEnabled = useCallback((enabled: boolean) => {
+    ctrlRef.current?.setLocalMicEnabled(enabled);
+  }, []);
+
   const acceptIncoming = useCallback(async (callId: string) => {
     await ctrlRef.current?.acceptIncoming(callId);
   }, []);
@@ -146,6 +150,7 @@ export function useMeetAudioCall(
       snapshot: snap,
       startCall,
       setLocalCameraEnabled,
+      setLocalMicEnabled,
       acceptIncoming,
       rejectIncoming,
       hangup,
@@ -157,6 +162,7 @@ export function useMeetAudioCall(
       snap,
       startCall,
       setLocalCameraEnabled,
+      setLocalMicEnabled,
       acceptIncoming,
       rejectIncoming,
       hangup,
