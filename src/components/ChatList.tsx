@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { MessageCircle, Search, Pencil, Users } from "lucide-react";
+import { MessageCircle, Search, Pencil, Users, Sparkles } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
 import {
   useChatStore,
@@ -17,6 +17,8 @@ import { StartChatModal } from "@/components/StartChatModal";
 import { CreateGroupModal } from "@/components/CreateGroupModal";
 import { OutgoingReceiptTicks } from "@/components/chat/ChatMessageBubble";
 import Image from "next/image";
+import { AI_ASSISTANT_NAME, AI_ASSISTANT_HREF } from "@/lib/aiAssistantConstants";
+import { useAiAssistantListPreview } from "@/components/ai/AiAssistantThread";
 
 function getInitials(name: string): string {
   const parts = name.trim().split(" ");
@@ -63,6 +65,35 @@ function isOwnMessage(msg: ChatMessage, currentUserId: string): boolean {
   );
 }
 
+function AiAssistantPinnedRow() {
+  const { subtitle, timeLabel } = useAiAssistantListPreview();
+  return (
+    <li>
+      <Link
+        href={AI_ASSISTANT_HREF}
+        className="flex items-center gap-3 border-b border-border bg-primary/[0.06] p-4 hover:bg-muted/50 active:bg-muted"
+      >
+        <div className="relative shrink-0">
+          <div className="flex h-12 w-12 items-center justify-center rounded-full border border-primary/35 bg-primary/15 text-primary shadow-sm">
+            <Sparkles className="h-6 w-6" aria-hidden />
+          </div>
+        </div>
+        <div className="flex min-w-0 flex-1 items-start gap-2">
+          <div className="min-w-0 flex-1">
+            <div className="truncate font-medium text-foreground">{AI_ASSISTANT_NAME}</div>
+            <p className="mt-0.5 truncate text-sm text-muted-foreground">{subtitle}</p>
+          </div>
+          {timeLabel ? (
+            <div className="flex shrink-0 flex-col items-end gap-0.5 pt-0.5">
+              <span className="text-xs tabular-nums leading-none text-muted-foreground">{timeLabel}</span>
+            </div>
+          ) : null}
+        </div>
+      </Link>
+    </li>
+  );
+}
+
 export type ChatListProps = {
   /** На нативе: при false отключается WebView pull-to-refresh (чтобы не мешал скроллу открытого чата). */
   allowNativePullToRefresh?: boolean;
@@ -103,7 +134,7 @@ export function ChatList({ allowNativePullToRefresh = true }: ChatListProps) {
       c.otherUser.name.toLowerCase().includes(search.toLowerCase())
   );
   const sorted = sortChatsWithUnreadFirst(filtered);
-  const isEmpty = !listLoading && sorted.length === 0;
+  const realChatsEmpty = !listLoading && sorted.length === 0;
 
   return (
     <div className="relative flex h-full min-h-0 flex-col">
@@ -154,88 +185,97 @@ export function ChatList({ allowNativePullToRefresh = true }: ChatListProps) {
           </div>
         )}
         {listLoading ? (
-          <div className="flex flex-col items-center justify-center py-16">
-            <div className="animate-spin rounded-full h-10 w-10 border-2 border-primary border-t-transparent mb-3" />
-            <p className="text-sm text-muted-foreground">Загрузка чатов…</p>
-          </div>
-        ) : isEmpty ? (
-          <div className="flex flex-col items-center justify-center py-16 px-4 text-center">
-            <div className="w-16 h-16 rounded-full bg-muted flex items-center justify-center mb-4">
-              <MessageCircle size={28} className="text-muted-foreground" />
+          <div className="flex flex-col">
+            <ul className="divide-y divide-border">
+              <AiAssistantPinnedRow />
+            </ul>
+            <div className="flex flex-col items-center justify-center py-12">
+              <div className="mb-3 h-10 w-10 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+              <p className="text-sm text-muted-foreground">Загрузка чатов…</p>
             </div>
-            <p className="text-foreground font-medium mb-1">Нет чатов</p>
-            <p className="text-sm text-muted-foreground mb-4">
-              Список чатов пуст. Выберите пользователя и начните общение.
-            </p>
-            <button
-              type="button"
-              onClick={() => setStartChatOpen(true)}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-primary text-primary-foreground font-medium"
-            >
-              <Pencil size={18} />
-              Начать чат
-            </button>
           </div>
         ) : (
-          <ul className="divide-y divide-border">
-            {sorted.map((chat) => (
-              <li key={chat.id}>
-                <Link
-                  href={
-                    isGroupThreadPeerId(chat.otherUser.id)
-                      ? `/?roomId=${encodeURIComponent(chat.id)}`
-                      : `/?userId=${encodeURIComponent(chat.otherUser.id)}`
-                  }
-                  className="flex items-center gap-3 p-4 hover:bg-muted/50 active:bg-muted"
-                >
-                  <div className="relative shrink-0">
-                    {chat.otherUser.avatar ? (
-                      <Image
-                        src={chat.otherUser.avatar}
-                        alt=""
-                        width={48}
-                        height={48}
-                        className="rounded-full object-cover w-12 h-12"
-                        unoptimized
-                      />
-                    ) : (
-                      <div
-                        className="w-12 h-12 rounded-full bg-primary/20 text-primary flex items-center justify-center font-medium text-lg"
-                        style={{ fontSize: "1rem" }}
-                      >
-                        {getInitials(chat.otherUser.name)}
-                      </div>
-                    )}
-                  </div>
-                  <div className="min-w-0 flex-1 flex items-start gap-2">
-                    <div className="min-w-0 flex-1">
-                      <div className="font-medium text-foreground truncate">{chat.otherUser.name}</div>
-                      <p className="mt-0.5 text-sm text-muted-foreground truncate">
-                        {chat.lastMessage
-                          ? lastMessagePreviewForList(chat.lastMessage, user.id, chat)
-                          : "Нет сообщений"}
-                      </p>
+          <>
+            <ul className="divide-y divide-border">
+              <AiAssistantPinnedRow />
+              {sorted.map((chat) => (
+                <li key={chat.id}>
+                  <Link
+                    href={
+                      isGroupThreadPeerId(chat.otherUser.id)
+                        ? `/?roomId=${encodeURIComponent(chat.id)}`
+                        : `/?userId=${encodeURIComponent(chat.otherUser.id)}`
+                    }
+                    className="flex items-center gap-3 p-4 hover:bg-muted/50 active:bg-muted"
+                  >
+                    <div className="relative shrink-0">
+                      {chat.otherUser.avatar ? (
+                        <Image
+                          src={chat.otherUser.avatar}
+                          alt=""
+                          width={48}
+                          height={48}
+                          className="h-12 w-12 rounded-full object-cover"
+                          unoptimized
+                        />
+                      ) : (
+                        <div
+                          className="flex h-12 w-12 items-center justify-center rounded-full bg-primary/20 text-lg font-medium text-primary"
+                          style={{ fontSize: "1rem" }}
+                        >
+                          {getInitials(chat.otherUser.name)}
+                        </div>
+                      )}
                     </div>
-                    {chat.lastMessage ? (
-                      <div className="flex shrink-0 flex-col items-end gap-0.5 pt-0.5">
-                        <span className="text-xs text-muted-foreground tabular-nums leading-none">
-                          {formatMessageTime(chat.lastMessage.timestamp)}
-                        </span>
-                        {chat.unreadCount > 0 ? (
-                          <span className="h-5 w-5 rounded-full bg-primary text-primary-foreground text-[10px] flex items-center justify-center leading-none">
-                            {chat.unreadCount > 99 ? "99+" : chat.unreadCount}
-                          </span>
-                        ) : null}
-                        {isOwnMessage(chat.lastMessage, user.id) ? (
-                          <OutgoingReceiptTicks status={chat.lastMessage.status} variant="onClear" />
-                        ) : null}
+                    <div className="flex min-w-0 flex-1 items-start gap-2">
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate font-medium text-foreground">{chat.otherUser.name}</div>
+                        <p className="mt-0.5 truncate text-sm text-muted-foreground">
+                          {chat.lastMessage
+                            ? lastMessagePreviewForList(chat.lastMessage, user.id, chat)
+                            : "Нет сообщений"}
+                        </p>
                       </div>
-                    ) : null}
-                  </div>
-                </Link>
-              </li>
-            ))}
-          </ul>
+                      {chat.lastMessage ? (
+                        <div className="flex shrink-0 flex-col items-end gap-0.5 pt-0.5">
+                          <span className="text-xs leading-none text-muted-foreground tabular-nums">
+                            {formatMessageTime(chat.lastMessage.timestamp)}
+                          </span>
+                          {chat.unreadCount > 0 ? (
+                            <span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary text-[10px] font-medium leading-none text-primary-foreground">
+                              {chat.unreadCount > 99 ? "99+" : chat.unreadCount}
+                            </span>
+                          ) : null}
+                          {isOwnMessage(chat.lastMessage, user.id) ? (
+                            <OutgoingReceiptTicks status={chat.lastMessage.status} variant="onClear" />
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+            {realChatsEmpty ? (
+              <div className="flex flex-col items-center justify-center px-4 py-12 text-center">
+                <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-muted">
+                  <MessageCircle size={28} className="text-muted-foreground" />
+                </div>
+                <p className="mb-1 font-medium text-foreground">Нет чатов с людьми</p>
+                <p className="mb-4 text-sm text-muted-foreground">
+                  Сверху — AI-помощник. Ниже можно начать обычный чат.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setStartChatOpen(true)}
+                  className="inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2 font-medium text-primary-foreground"
+                >
+                  <Pencil size={18} />
+                  Начать чат
+                </button>
+              </div>
+            ) : null}
+          </>
         )}
       </div>
 

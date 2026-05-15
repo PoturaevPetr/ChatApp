@@ -12,8 +12,8 @@ APK_OUT_NAME="Kindred.apk"
 # Укажите те же major.minor.patch, что при загрузке APK в админке релизов ChatService.
 # versionCode — целое, должно расти с каждой публикацией (магазин / устройство сравнивают коды).
 # Пример разбора для 1.6.6: 1*10000 + 6*100 + 6 = 10606.
-APP_VERSION_NAME="1.11.6"
-APP_VERSION_CODE=101106
+APP_VERSION_NAME="1.12.1"
+APP_VERSION_CODE=101201
 
 echo "🔧 Сборка APK: $APP_NAME"
 echo "   Проект: $PROJECT_DIR"

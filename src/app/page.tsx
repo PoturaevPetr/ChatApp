@@ -6,11 +6,13 @@ import { AuthGuard } from "@/components/AuthGuard";
 import { Layout } from "@/components/Layout";
 import { ChatList } from "@/components/ChatList";
 import { ChatThreadScreen } from "@/components/chat/ChatThreadScreen";
+import { AiAssistantThread } from "@/components/ai/AiAssistantThread";
 import {
   CHAT_OVERLAY_CLOSE_EVENT,
   CHAT_OVERLAY_SLIDE_MS,
   consumeNextChatOverlayOpenWithoutSlide,
 } from "@/lib/chatOverlayEvents";
+import { AI_ASSISTANT_QUERY_VALUE } from "@/lib/aiAssistantConstants";
 import { useMediaMinMd } from "@/hooks/useMediaMinMd";
 import { chatListSidebarMd } from "@/lib/chatListSidebar";
 
@@ -18,8 +20,11 @@ function HomeInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const isWide = useMediaMinMd();
+  const aiOverlayOpen = searchParams.get("ai")?.trim() === AI_ASSISTANT_QUERY_VALUE;
   const threadOverlayOpen = !!(
-    searchParams.get("roomId")?.trim() || searchParams.get("userId")?.trim()
+    searchParams.get("roomId")?.trim() ||
+    searchParams.get("userId")?.trim() ||
+    aiOverlayOpen
   );
 
   const [slideEntered, setSlideEntered] = useState(false);
@@ -106,9 +111,9 @@ function HomeInner() {
               style={mobileSlideStyle}
               aria-modal={isWide ? undefined : "true"}
               role="dialog"
-              aria-label="Переписка"
+              aria-label={aiOverlayOpen ? "AI-помощник" : "Переписка"}
             >
-              <ChatThreadScreen mode="embedded" />
+              {aiOverlayOpen ? <AiAssistantThread mode="embedded" /> : <ChatThreadScreen mode="embedded" />}
             </div>
           ) : null}
         </section>
