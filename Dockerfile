@@ -11,7 +11,6 @@ RUN npm ci --legacy-peer-deps
 
 # Явно копируем исходники (без COPY . — меньше контекст, нет зависимости от scripts/ в репо)
 COPY src ./src
-COPY public ./public
 COPY next.config.ts tsconfig.json postcss.config.mjs tailwind.config.ts ./
 COPY icon.png ./icon.png
 
@@ -37,8 +36,9 @@ ENV NODE_ENV=production \
     NEXT_PUBLIC_TRANSCRIBE_URL=$NEXT_PUBLIC_TRANSCRIBE_URL \
     NEXT_PUBLIC_OAUTH_NATIVE_BRIDGE_URL=$NEXT_PUBLIC_OAUTH_NATIVE_BRIDGE_URL
 
-# prebuild (copy-launch-assets.mjs) не вызываем — launch-icon для статики
-RUN mkdir -p public && (test -f icon.png && cp -f icon.png public/launch-icon.png || true)
+# public/ может отсутствовать в клоне — создаём launch-icon из icon.png (как prebuild)
+RUN mkdir -p public \
+  && (test -f icon.png && cp -f icon.png public/launch-icon.png || true)
 
 RUN npm run build:docker
 

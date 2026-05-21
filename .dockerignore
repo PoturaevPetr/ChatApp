@@ -19,8 +19,6 @@ PipeChat.apk
 *.md
 !README.md
 deploy
-docker
-Dockerfile
 docker-compose.yml
 .env.docker.example
 *.keystore
