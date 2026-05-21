@@ -6,8 +6,9 @@ WORKDIR /app
 
 RUN apk add --no-cache libc6-compat
 
-COPY package.json package-lock.json .npmrc ./
-RUN npm ci
+COPY package.json package-lock.json ./
+# Capacitor 7 + @capawesome-team/capacitor-file-opener@8 — peer conflict; см. .npmrc локально
+RUN npm ci --legacy-peer-deps
 
 COPY . .
 
