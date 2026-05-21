@@ -6,6 +6,7 @@
     "prebuild": "node scripts/copy-launch-assets.mjs",
     "dev": "next dev",
     "build": "next build",
+    "build:docker": "next build",
     "start": "next start",
     "lint": "next lint",
     "type-check": "tsc --noEmit",

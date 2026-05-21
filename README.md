@@ -66,7 +66,10 @@ npm run cap:open:ios
 
 ## Docker (веб) и мобильное приложение из одного репозитория
 
-Оба варианта используют **`npm run build`** (статический каталог `out/`), но **разные env-файлы**:
+Оба варианта собирают статический каталог `out/`, но **разные env-файлы** и команда сборки:
+
+- **APK / iOS:** `npm run build` (с `prebuild` → `scripts/copy-launch-assets.mjs`)
+- **Docker:** `npm run build:docker` (только `next build`, без `prebuild`)
 
 | Цель | Env-файл | Ollama в браузере/вебе |
 |------|----------|-------------------------|
