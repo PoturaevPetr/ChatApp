@@ -64,4 +64,38 @@ npm run cap:open:ios
 
 Перед `cap sync` всегда выполняется `npm run build`; Capacitor подхватывает содержимое папки `out/` как веб-приложение.
 
+## Docker (веб) и мобильное приложение из одного репозитория
+
+Оба варианта используют **`npm run build`** (статический каталог `out/`), но **разные env-файлы**:
+
+| Цель | Env-файл | Ollama в браузере/вебе |
+|------|----------|-------------------------|
+| **APK / iOS** | `.env.local` | Прямой URL `NEXT_PUBLIC_OLLAMA_BASE_URL` (CapacitorHttp) |
+| **Docker (nginx)** | `.env.docker` | Прокси `/api/ollama-proxy` (`NEXT_PUBLIC_OLLAMA_USE_SAME_ORIGIN_PROXY=true`) |
+
+### Веб в Docker
+
+```bash
+cp .env.docker.example .env.docker
+# Отредактируйте NEXT_PUBLIC_CHAT_API_URL, NEXT_PUBLIC_OLLAMA_API_KEY и т.д.
+
+npm run docker:build
+npm run docker:up
+```
+
+Откройте `http://localhost:3080` (порт задаётся `CHATAPP_HTTP_PORT` в `.env.docker`).
+
+ChatService должен быть доступен по URL из `NEXT_PUBLIC_CHAT_API_URL` (с хоста браузера или из той же сети).
+
+Пересборка образа нужна при смене любого `NEXT_PUBLIC_*`. Смена только `OLLAMA_UPSTREAM` в compose — без пересборки (runtime nginx).
+
+### Мобильное приложение (как раньше)
+
+```bash
+# .env.local — без NEXT_PUBLIC_OLLAMA_USE_SAME_ORIGIN_PROXY=true
+./build-apk.sh
+```
+
+Или вручную: `npm run build` → `npx cap sync android`.
+
 

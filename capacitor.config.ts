@@ -53,6 +53,13 @@ const config = {
     Media: {
       androidGalleryMode: true,
     },
+    /**
+     * Патчит fetch/XMLHttpRequest на нативный стек на iOS/Android.
+     * Иначе WebView делает обычный fetch → CORS к llm.oclinica.ru ломает AI, даже при валидном nginx.
+     */
+    CapacitorHttp: {
+      enabled: true,
+    },
     /** Нативный splash: белый фон; скрытие из JS после показа WebView-оверлея (см. NativeLaunchOverlay). */
     SplashScreen: {
       backgroundColor: "#ffffff",

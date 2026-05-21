@@ -22,6 +22,7 @@ import {
   Pencil,
   Phone,
   PhoneOff,
+  Sparkles,
 } from "lucide-react";
 import { AuthGuard } from "@/components/AuthGuard";
 import { Layout } from "@/components/Layout";
@@ -41,6 +42,19 @@ import { useWebSocketStore } from "@/stores/websocketStore";
 import { chatWebSocket } from "@/services/chatWebSocket";
 import { getMessagePreviewText, groupMessagesByDate } from "@/utils/chatUtils";
 import { getValidAuthTokens } from "@/lib/validAuthToken";
+import { AI_ASSISTANT_HREF } from "@/lib/aiAssistantConstants";
+import { markNextChatOverlayOpenWithoutSlide } from "@/lib/chatOverlayEvents";
+import {
+  buildChatPeriodAnalysisRequest,
+  buildMessageAnalysisRequest,
+  fetchVoiceTranscriptionText,
+  getVoiceAttachmentId,
+  isMessageAnalysisCandidate,
+  isTextAnalyzableMessage,
+  type ChatAnalysisPeriodHours,
+} from "@/lib/messageAnalysis";
+import { ChatPeriodAnalysisModal } from "@/components/chat/ChatPeriodAnalysisModal";
+import { useAiAssistantStore } from "@/stores/aiAssistantStore";
 import { deleteRoom, leaveRoom } from "@/services/chatRoomsApi";
 import { deleteMessage as deleteMessageOnServer } from "@/services/chatMessagesApi";
 import { setMessageReaction } from "@/services/chatReactionsApi";
@@ -383,6 +397,11 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
   const [leaveGroupModalOpen, setLeaveGroupModalOpen] = useState(false);
   const [isLeavingGroup, setIsLeavingGroup] = useState(false);
   const [messageMenu, setMessageMenu] = useState<{ message: ChatMessage; rect: DOMRect } | null>(null);
+  const [messageAnalyzeReady, setMessageAnalyzeReady] = useState(false);
+  const [isMessageAnalyzing, setIsMessageAnalyzing] = useState(false);
+  const [chatPeriodAnalysisOpen, setChatPeriodAnalysisOpen] = useState(false);
+  const [isChatPeriodAnalysisRunning, setIsChatPeriodAnalysisRunning] = useState(false);
+  const queueMessageAnalysis = useAiAssistantStore((s) => s.queueMessageAnalysis);
   const [deleteMessageTarget, setDeleteMessageTarget] = useState<ChatMessage | null>(null);
   const [isDeletingMessage, setIsDeletingMessage] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -1177,6 +1196,133 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
     [activeRoomId, user?.id, applyMessageReaction],
   );
 
+  useEffect(() => {
+    if (!messageMenu) {
+      setMessageAnalyzeReady(false);
+      return;
+    }
+    const msg = messageMenu.message;
+    if (!isMessageAnalysisCandidate(msg)) {
+      setMessageAnalyzeReady(false);
+      return;
+    }
+    if (isTextAnalyzableMessage(msg)) {
+      setMessageAnalyzeReady(true);
+      return;
+    }
+    let cancelled = false;
+    setMessageAnalyzeReady(false);
+    const attachmentId = getVoiceAttachmentId(msg);
+    if (!attachmentId) return;
+    void (async () => {
+      try {
+        const tokens = await getValidAuthTokens();
+        if (cancelled || !tokens?.access_token) return;
+        const text = await fetchVoiceTranscriptionText(tokens.access_token, attachmentId);
+        if (!cancelled) setMessageAnalyzeReady(Boolean(text));
+      } catch {
+        if (!cancelled) setMessageAnalyzeReady(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [messageMenu]);
+
+  const handleMessageAnalyze = useCallback(async () => {
+    const menu = messageMenu;
+    if (!menu || !messageAnalyzeReady || isMessageAnalyzing) return;
+    const msg = menu.message;
+    const uid = user?.id?.trim();
+    if (!uid) return;
+
+    setIsMessageAnalyzing(true);
+    setMessageMenu(null);
+    try {
+      const tokens = await getValidAuthTokens();
+      if (!tokens?.access_token) {
+        setFileError("Нет авторизации — войдите снова.");
+        return;
+      }
+      const request = await buildMessageAnalysisRequest({
+        chatTitle: displayName,
+        messages: activeChatMessages,
+        targetMessageId: msg.id,
+        currentUserId: uid,
+        peerDisplayName: displayName,
+        memberShortNameByUserId: activeGroupRow?.memberShortNameByUserId,
+        accessToken: tokens.access_token,
+      });
+      if (!request) {
+        setFileError("Не удалось подготовить анализ для этого сообщения.");
+        return;
+      }
+      queueMessageAnalysis(request);
+      markNextChatOverlayOpenWithoutSlide();
+      router.push(AI_ASSISTANT_HREF);
+    } catch (e) {
+      setFileError(e instanceof Error ? e.message : "Не удалось запустить анализ");
+    } finally {
+      setIsMessageAnalyzing(false);
+    }
+  }, [
+    messageMenu,
+    messageAnalyzeReady,
+    isMessageAnalyzing,
+    user?.id,
+    displayName,
+    activeChatMessages,
+    activeGroupRow?.memberShortNameByUserId,
+    queueMessageAnalysis,
+    router,
+  ]);
+
+  const handleChatPeriodAnalysis = useCallback(
+    async (periodHours: ChatAnalysisPeriodHours) => {
+      const uid = user?.id?.trim();
+      if (!uid || isChatPeriodAnalysisRunning) return;
+
+      setIsChatPeriodAnalysisRunning(true);
+      try {
+        const tokens = await getValidAuthTokens();
+        if (!tokens?.access_token) {
+          setFileError("Нет авторизации — войдите снова.");
+          return;
+        }
+        const request = await buildChatPeriodAnalysisRequest({
+          chatTitle: displayName,
+          messages: activeChatMessages,
+          periodHours,
+          currentUserId: uid,
+          peerDisplayName: displayName,
+          memberShortNameByUserId: activeGroupRow?.memberShortNameByUserId,
+          accessToken: tokens.access_token,
+        });
+        if (!request) {
+          setFileError("Нет сообщений за выбранный период.");
+          return;
+        }
+        queueMessageAnalysis(request);
+        setChatPeriodAnalysisOpen(false);
+        markNextChatOverlayOpenWithoutSlide();
+        router.push(AI_ASSISTANT_HREF);
+      } catch (e) {
+        setFileError(e instanceof Error ? e.message : "Не удалось запустить анализ");
+      } finally {
+        setIsChatPeriodAnalysisRunning(false);
+      }
+    },
+    [
+      user?.id,
+      isChatPeriodAnalysisRunning,
+      displayName,
+      activeChatMessages,
+      activeGroupRow?.memberShortNameByUserId,
+      queueMessageAnalysis,
+      router,
+    ],
+  );
+
   const handleReactionChipFromBubble = useCallback(
     (messageId: string, emoji: string, chipUserId: string) => {
       const uid = user?.id;
@@ -1935,6 +2081,19 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
                     role="menu"
                     className="absolute right-0 mt-2 min-w-[12rem] overflow-hidden rounded-xl border border-white/15 bg-background/70 backdrop-blur-xl shadow-xl"
                   >
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setHeaderMenuOpen(false);
+                        setChatPeriodAnalysisOpen(true);
+                      }}
+                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-foreground hover:bg-white/10 focus:outline-none focus:bg-white/10"
+                    >
+                      <Sparkles className="h-4 w-4 text-primary" />
+                      Анализ переписки
+                    </button>
+                    <div className="border-t border-white/10" role="separator" />
                     {isGroupChat ? (
                       <>
                         <button
@@ -2014,6 +2173,16 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
               </button>
             </div>
           ) : null}
+
+          <ChatPeriodAnalysisModal
+            open={chatPeriodAnalysisOpen}
+            chatTitle={displayName}
+            onClose={() => {
+              if (!isChatPeriodAnalysisRunning) setChatPeriodAnalysisOpen(false);
+            }}
+            onSelectPeriod={(hours) => void handleChatPeriodAnalysis(hours)}
+            isRunning={isChatPeriodAnalysisRunning}
+          />
 
           {deleteModalOpen ? (
             <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
@@ -2121,6 +2290,9 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
                 const msg = messageMenu.message;
                 void submitMessageReaction(msg.id, emoji);
               }}
+              canAnalyze={messageAnalyzeReady}
+              onAnalyze={() => void handleMessageAnalyze()}
+              analyzeInProgress={isMessageAnalyzing}
             />
           ) : null}
 

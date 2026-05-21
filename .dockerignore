@@ -1,0 +1,15 @@
+node_modules
+.next
+out
+android
+ios
+.git
+.cursor
+*.md
+!README.md
+.env.local
+.env*.local
+terminals
+.gradle-home
+**/*.apk
+**/.DS_Store

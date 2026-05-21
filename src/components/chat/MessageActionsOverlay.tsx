@@ -2,7 +2,16 @@
 
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
-import { ChevronDown, ChevronUp, Copy, ExternalLink, MessageSquareReply, Trash2 } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronUp,
+  Copy,
+  ExternalLink,
+  Loader2,
+  MessageSquareReply,
+  Sparkles,
+  Trash2,
+} from "lucide-react";
 import type { ChatMessage } from "@/stores/chatStore";
 import { CHAT_REACTION_EMOJIS } from "@/lib/chatReactionEmojis";
 import { openUrlInSystemBrowser } from "@/lib/openExternalUrl";
@@ -26,6 +35,10 @@ export type MessageActionsOverlayProps = {
   roomId: string | null;
   canReact: boolean;
   onPickReaction: (emoji: string) => void;
+  /** Показать «Анализ» (текст или голос с готовой расшифровкой). */
+  canAnalyze?: boolean;
+  onAnalyze?: () => void;
+  analyzeInProgress?: boolean;
 };
 
 async function copyToClipboard(text: string): Promise<boolean> {
@@ -77,6 +90,9 @@ export function MessageActionsOverlay({
   roomId,
   canReact,
   onPickReaction,
+  canAnalyze = false,
+  onAnalyze,
+  analyzeInProgress = false,
 }: MessageActionsOverlayProps) {
   const [reactionsExpanded, setReactionsExpanded] = useState(false);
 
@@ -225,6 +241,24 @@ export function MessageActionsOverlay({
               >
                 <ExternalLink className="h-5 w-5 shrink-0 text-primary" aria-hidden />
                 Перейти
+              </button>
+            ) : null}
+            {canAnalyze && onAnalyze ? (
+              <button
+                type="button"
+                role="menuitem"
+                disabled={analyzeInProgress}
+                className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm font-medium text-foreground hover:bg-white/10 focus:outline-none focus:bg-white/10 disabled:opacity-50"
+                onClick={() => {
+                  onAnalyze();
+                }}
+              >
+                {analyzeInProgress ? (
+                  <Loader2 className="h-5 w-5 shrink-0 animate-spin text-primary" aria-hidden />
+                ) : (
+                  <Sparkles className="h-5 w-5 shrink-0 text-primary" aria-hidden />
+                )}
+                Анализ
               </button>
             ) : null}
             {canDelete ? (

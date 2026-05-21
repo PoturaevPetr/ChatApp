@@ -1,0 +1,37 @@
+# Веб-версия Kindred (статический out/ + nginx).
+# ChatService поднимайте отдельно: ../ChatService/docker-compose.yml
+#
+#   cp .env.docker.example .env.docker
+#   docker compose --env-file .env.docker build
+#   docker compose --env-file .env.docker up -d
+#
+# Мобильное APK: ./build-apk.sh (использует .env.local, не этот compose).
+
+services:
+  chatapp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_CHAT_API_URL: ${NEXT_PUBLIC_CHAT_API_URL:-https://chat.pirogov.ai}
+        NEXT_PUBLIC_OLLAMA_BASE_URL: ${NEXT_PUBLIC_OLLAMA_BASE_URL:-https://llm.oclinica.ru}
+        NEXT_PUBLIC_OLLAMA_MODEL: ${NEXT_PUBLIC_OLLAMA_MODEL:-gemma3:4b}
+        NEXT_PUBLIC_OLLAMA_API_KEY: ${NEXT_PUBLIC_OLLAMA_API_KEY:-}
+        NEXT_PUBLIC_OLLAMA_API_KEY_HEADER: ${NEXT_PUBLIC_OLLAMA_API_KEY_HEADER:-}
+        NEXT_PUBLIC_OLLAMA_USE_SAME_ORIGIN_PROXY: ${NEXT_PUBLIC_OLLAMA_USE_SAME_ORIGIN_PROXY:-true}
+        NEXT_PUBLIC_MEET_SERVICE_URL: ${NEXT_PUBLIC_MEET_SERVICE_URL:-}
+        NEXT_PUBLIC_TRANSCRIBE_URL: ${NEXT_PUBLIC_TRANSCRIBE_URL:-}
+        NEXT_PUBLIC_OAUTH_NATIVE_BRIDGE_URL: ${NEXT_PUBLIC_OAUTH_NATIVE_BRIDGE_URL:-}
+    image: kindred-chatapp:local
+    container_name: kindred_chatapp
+    restart: unless-stopped
+    ports:
+      - "${CHATAPP_HTTP_PORT:-3080}:80"
+    environment:
+      OLLAMA_UPSTREAM: ${OLLAMA_UPSTREAM:-https://llm.oclinica.ru}
+    networks:
+      - kindred-front
+
+networks:
+  kindred-front:
+    driver: bridge

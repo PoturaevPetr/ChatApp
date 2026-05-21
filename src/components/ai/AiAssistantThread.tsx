@@ -2,8 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, Loader2, Send, Sparkles } from "lucide-react";
+import { ArrowLeft, Check, Loader2, MoreVertical, Send, Sparkles } from "lucide-react";
 import { useAiAssistantStore } from "@/stores/aiAssistantStore";
+import { useOllamaModelStore } from "@/stores/ollamaModelStore";
 import { formatMessageTime } from "@/utils/chatUtils";
 import { getMessageBubbleClassName } from "@/components/chat/chatMessageBubbleClassName";
 import { AI_ASSISTANT_NAME } from "@/lib/aiAssistantConstants";
@@ -15,8 +16,56 @@ export function AiAssistantThread({ mode = "embedded" }: { mode?: "embedded" | "
   const messages = useAiAssistantStore((s) => s.messages);
   const isGenerating = useAiAssistantStore((s) => s.isGenerating);
   const sendUserText = useAiAssistantStore((s) => s.sendUserText);
+  const sendAnalysisRequest = useAiAssistantStore((s) => s.sendAnalysisRequest);
+  const consumePendingMessageAnalysis = useAiAssistantStore((s) => s.consumePendingMessageAnalysis);
   const [input, setInput] = useState("");
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const pendingAnalysisStartedRef = useRef(false);
+
+  const selectedModel = useOllamaModelStore((s) => s.selectedModel);
+  const models = useOllamaModelStore((s) => s.models);
+  const modelsLoading = useOllamaModelStore((s) => s.modelsLoading);
+  const modelsError = useOllamaModelStore((s) => s.modelsError);
+  const hydrateFromStorage = useOllamaModelStore((s) => s.hydrateFromStorage);
+  const setSelectedModel = useOllamaModelStore((s) => s.setSelectedModel);
+  const loadModels = useOllamaModelStore((s) => s.loadModels);
+
+  useEffect(() => {
+    hydrateFromStorage();
+  }, [hydrateFromStorage]);
+
+  useEffect(() => {
+    if (!modelMenuOpen) return;
+    void loadModels();
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setModelMenuOpen(false);
+    };
+    const onPointerDown = (e: PointerEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target?.closest("[data-ai-model-menu-root]")) setModelMenuOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("pointerdown", onPointerDown);
+    };
+  }, [modelMenuOpen, loadModels]);
+
+  useEffect(() => {
+    if (pendingAnalysisStartedRef.current) return;
+    const pending = consumePendingMessageAnalysis();
+    if (!pending) return;
+    pendingAnalysisStartedRef.current = true;
+    void sendAnalysisRequest(pending.displayText, pending.llmPrompt);
+  }, [consumePendingMessageAnalysis, sendAnalysisRequest]);
+
+  useEffect(() => {
+    return () => {
+      pendingAnalysisStartedRef.current = false;
+    };
+  }, []);
 
   const onBack = () => {
     if (mode === "embedded") {
@@ -55,9 +104,83 @@ export function AiAssistantThread({ mode = "embedded" }: { mode?: "embedded" | "
         </div>
         <div className="flex min-h-0 min-w-0 flex-1 flex-col justify-center gap-px">
           <div className="truncate text-sm font-semibold leading-none text-foreground">{AI_ASSISTANT_NAME}</div>
-          <p className="truncate text-[11px] leading-tight text-muted-foreground">
-            {isGenerating ? "Печатает…" : "Локальная модель (Ollama)"}
+          <p className="truncate text-[11px] leading-tight text-muted-foreground" title={selectedModel}>
+            {isGenerating ? "Печатает…" : selectedModel}
           </p>
+        </div>
+
+        <div className="relative shrink-0" data-ai-model-menu-root>
+          <button
+            type="button"
+            onClick={() => setModelMenuOpen((v) => !v)}
+            className="rounded-full p-2 text-muted-foreground hover:bg-muted hover:text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
+            aria-label="Выбор модели"
+            title="Выбор модели"
+            aria-expanded={modelMenuOpen}
+            aria-haspopup="menu"
+          >
+            <MoreVertical className="h-5 w-5" />
+          </button>
+
+          {modelMenuOpen ? (
+            <div
+              role="menu"
+              aria-label="Модели Ollama"
+              className="absolute right-0 top-full z-40 mt-1 max-h-[min(320px,50dvh)] min-w-[14rem] overflow-y-auto rounded-xl border border-white/15 bg-background/95 py-1 shadow-xl backdrop-blur-xl"
+            >
+              {modelsLoading && models.length === 0 ? (
+                <div className="flex items-center gap-2 px-3 py-2.5 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden />
+                  Загрузка…
+                </div>
+              ) : null}
+              {modelsError ? (
+                <p className="px-3 py-2 text-xs text-destructive">{modelsError}</p>
+              ) : null}
+              {!modelsLoading && models.length === 0 && !modelsError ? (
+                <p className="px-3 py-2 text-xs text-muted-foreground">Нет доступных моделей</p>
+              ) : null}
+              {models.map((name) => {
+                const selected = name === selectedModel;
+                return (
+                  <button
+                    key={name}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={selected}
+                    onClick={() => {
+                      setSelectedModel(name);
+                      setModelMenuOpen(false);
+                    }}
+                    className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-white/10 focus:outline-none focus:bg-white/10 ${
+                      selected ? "font-medium text-foreground" : "text-foreground/90"
+                    }`}
+                  >
+                    <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+                      {selected ? <Check className="h-4 w-4 text-primary" aria-hidden /> : null}
+                    </span>
+                    <span className="min-w-0 truncate">{name}</span>
+                  </button>
+                );
+              })}
+              {selectedModel && !models.includes(selectedModel) && !modelsLoading ? (
+                <button
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked
+                  onClick={() => setModelMenuOpen(false)}
+                  className="flex w-full items-center gap-2 border-t border-border px-3 py-2 text-left text-sm font-medium text-foreground hover:bg-white/10 focus:outline-none focus:bg-white/10"
+                >
+                  <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+                    <Check className="h-4 w-4 text-primary" aria-hidden />
+                  </span>
+                  <span className="min-w-0 truncate" title={selectedModel}>
+                    {selectedModel}
+                  </span>
+                </button>
+              ) : null}
+            </div>
+          ) : null}
         </div>
       </header>
 

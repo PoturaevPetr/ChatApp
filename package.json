@@ -14,7 +14,10 @@
     "cap:add:ios": "cap add ios",
     "cap:sync": "npm run build && cap sync",
     "cap:open:android": "cap open android",
-    "cap:open:ios": "cap open ios"
+    "cap:open:ios": "cap open ios",
+    "docker:build": "docker compose --env-file .env.docker build",
+    "docker:up": "docker compose --env-file .env.docker up -d",
+    "docker:down": "docker compose --env-file .env.docker down"
   },
   "dependencies": {
     "@capacitor-community/media": "^8.0.1",

@@ -52,6 +52,13 @@ rm -rf out .next
 
 # Next.js
 echo "📦 Сборка Next.js..."
+if [ ! -f ".env.local" ] && [ -z "${NEXT_PUBLIC_OLLAMA_API_KEY:-}" ]; then
+  echo "⚠️  Нет .env.local и нет NEXT_PUBLIC_OLLAMA_API_KEY в окружении — AI на llm.oclinica.ru в APK не сможет авторизоваться."
+fi
+if [ -f ".env.local" ] && grep -qE '^NEXT_PUBLIC_OLLAMA_USE_SAME_ORIGIN_PROXY=true' .env.local 2>/dev/null; then
+  echo "⚠️  NEXT_PUBLIC_OLLAMA_USE_SAME_ORIGIN_PROXY=true в .env.local — это для Docker-веба."
+  echo "   Для APK уберите эту строку или поставьте false (мобилка ходит на llm напрямую)."
+fi
 npm run build
 if [ ! -d "out" ]; then
     echo "❌ Папка out не создана после npm run build"
