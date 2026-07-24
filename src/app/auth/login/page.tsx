@@ -1,19 +1,37 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { MessageCircle, Loader2, ArrowLeft, Eye, EyeOff } from "lucide-react";
+import { Eye, EyeOff, QrCode, ScanLine, Smartphone } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
-import { OAuthSocialButtons } from "@/components/OAuthSocialButtons";
+import { DeviceLinkQrLoginModal } from "@/components/DeviceLinkQrLoginModal";
+import { DeviceLinkQrScannerOverlay } from "@/components/DeviceLinkQrScannerOverlay";
+import { useDeviceLinkQrCapabilities } from "@/hooks/useDeviceLinkQrCapabilities";
+import { isKindredLoginPayload, parseDeviceLinkPayload } from "@/lib/deviceLinkQr";
+import { AuthShell, AuthShellBody } from "@/components/auth/AuthShell";
+import { AuthHero } from "@/components/auth/AuthHero";
+import { AuthSection } from "@/components/auth/AuthSection";
+import { AuthCard } from "@/components/auth/AuthCard";
+import { AuthFormField } from "@/components/auth/AuthFormField";
+import { AuthPrimaryButton } from "@/components/auth/AuthPrimaryButton";
+import { AuthBackLink, AuthTopBar } from "@/components/auth/AuthBackLink";
+import { AuthActionRow } from "@/components/auth/AuthNavRow";
+import { AuthOAuthSection } from "@/components/auth/AuthOAuthSection";
+import { authInputClassName } from "@/components/auth/authStyles";
 
 export default function LoginPage() {
   const router = useRouter();
-  const { isAuthenticated, login, isLoading, error, clearError, initialize } = useAuthStore();
+  const { canScanQr, isDesktopWeb } = useDeviceLinkQrCapabilities();
+  const { isAuthenticated, login, loginWithDeviceLink, isLoading, error, clearError, initialize } =
+    useAuthStore();
   const [ready, setReady] = useState(false);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [qrOpen, setQrOpen] = useState(false);
+  const [scannerOpen, setScannerOpen] = useState(false);
+  const [scanError, setScanError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -42,118 +60,145 @@ export default function LoginPage() {
     }
   };
 
-  if (!ready) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
-        <div className="animate-spin rounded-full h-10 w-10 border-2 border-primary border-t-transparent" />
-      </div>
-    );
-  }
+  const openScanner = () => {
+    clearError();
+    setScanError(null);
+    setScannerOpen(true);
+  };
+
+  const openShowQr = () => {
+    clearError();
+    setScanError(null);
+    setQrOpen(true);
+  };
+
+  const onScannedLinkCode = useCallback(
+    async (raw: string) => {
+      if (isKindredLoginPayload(raw)) {
+        setScanError(
+          "Этот QR для входа на другом устройстве. На авторизованном устройстве: Профиль → Устройства → Подтвердить вход по QR.",
+        );
+        return;
+      }
+      const code = parseDeviceLinkPayload(raw) || raw.trim().toUpperCase();
+      if (code.length < 4) return;
+      clearError();
+      setScanError(null);
+      try {
+        await loginWithDeviceLink(code);
+        router.push("/");
+      } catch {
+        /* error in store */
+      }
+    },
+    [clearError, loginWithDeviceLink, router],
+  );
 
   return (
-    <div className="min-h-screen flex flex-col bg-background">
-      <div className="shrink-0 p-4">
-        <Link
-          href="/auth/"
-          className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"
-        >
-          <ArrowLeft size={18} />
-          Назад
-        </Link>
-      </div>
-      <div className="flex-1 flex flex-col items-center justify-center p-6">
-        <div className="w-full max-w-sm space-y-6">
-        <div className="text-center">
-          <div className="inline-flex w-16 h-16 rounded-2xl bg-primary/15 text-primary items-center justify-center mb-4">
-            <MessageCircle size={32} />
-          </div>
-          <h1 className="text-2xl font-bold text-foreground">Вход</h1>
-          <p className="mt-2 text-muted-foreground">Войдите в аккаунт</p>
-        </div>
+    <AuthShell loading={!ready}>
+      <AuthTopBar>
+        <AuthBackLink href="/auth/" />
+      </AuthTopBar>
 
-        <OAuthSocialButtons className="pb-2" />
-        <div className="relative py-2">
-          <div className="absolute inset-0 flex items-center" aria-hidden>
-            <span className="w-full border-t border-border" />
-          </div>
-          <div className="relative flex justify-center text-xs uppercase">
-            <span className="bg-background px-2 text-muted-foreground">или логин</span>
-          </div>
-        </div>
+      <AuthShellBody>
+        <AuthHero title="Вход" subtitle="Войдите в аккаунт" showLogo={false} />
 
-        <form onSubmit={handleSubmit} className="space-y-4">
-          {error && (
-            <div className="rounded-lg bg-destructive/10 text-destructive text-sm px-4 py-3">
-              {error}
-            </div>
-          )}
+        <AuthOAuthSection dividerLabel="или логин" />
 
-          <div>
-            <label htmlFor="username" className="block text-sm font-medium text-foreground mb-1">
-              Имя пользователя
-            </label>
-            <input
+        <AuthCard padded>
+          <form onSubmit={handleSubmit} className="space-y-4">
+            {error && !scannerOpen && !qrOpen ? (
+              <div className="rounded-xl bg-destructive/10 px-4 py-3 text-sm text-destructive">{error}</div>
+            ) : null}
+
+            <AuthFormField
               id="username"
+              label="Имя пользователя"
               type="text"
               autoComplete="username"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               placeholder="Введите логин"
               required
-              className="w-full rounded-xl border border-border bg-background px-4 py-3 text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary"
             />
-          </div>
 
-          <div>
-            <label htmlFor="password" className="block text-sm font-medium text-foreground mb-1">
-              Пароль
-            </label>
-            <div className="relative">
-              <input
-                id="password"
-                type={showPassword ? "text" : "password"}
-                autoComplete="current-password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••"
-                className="w-full rounded-xl border border-border bg-background px-4 pr-12 py-3 text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary"
+            <AuthFormField id="password" label="Пароль">
+              <div className="relative">
+                <input
+                  id="password"
+                  type={showPassword ? "text" : "password"}
+                  autoComplete="current-password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="••••••••"
+                  className={`${authInputClassName} pr-12`}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((v) => !v)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 rounded-lg p-2 text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
+                  aria-label={showPassword ? "Скрыть пароль" : "Показать пароль"}
+                  title={showPassword ? "Скрыть пароль" : "Показать пароль"}
+                >
+                  {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                </button>
+              </div>
+            </AuthFormField>
+
+            <AuthPrimaryButton type="submit" disabled={!username.trim()} loading={isLoading} loadingLabel="Вход...">
+              Войти
+            </AuthPrimaryButton>
+          </form>
+        </AuthCard>
+
+        <AuthSection title="Вход по QR">
+          <AuthCard>
+            {canScanQr ? (
+              <AuthActionRow
+                icon={ScanLine}
+                label="Сканировать QR"
+                subtitle="QR с авторизованного устройства (Профиль → Устройства)"
+                onClick={openScanner}
+                disabled={isLoading || scannerOpen || qrOpen}
               />
-              <button
-                type="button"
-                onClick={() => setShowPassword((v) => !v)}
-                className="absolute right-3 top-1/2 -translate-y-1/2 rounded-full p-2 text-muted-foreground hover:bg-muted/50 hover:text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
-                aria-label={showPassword ? "Скрыть пароль" : "Показать пароль"}
-                title={showPassword ? "Скрыть пароль" : "Показать пароль"}
-              >
-                {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
-              </button>
-            </div>
-          </div>
+            ) : null}
+            <AuthActionRow
+              icon={isDesktopWeb ? QrCode : Smartphone}
+              label="Показать QR для входа"
+              subtitle={
+                isDesktopWeb
+                  ? "Подтвердите вход на телефоне: Профиль → Устройства → Подтвердить вход по QR"
+                  : "Подтвердите вход на устройстве, где уже выполнен вход"
+              }
+              onClick={openShowQr}
+              disabled={isLoading || scannerOpen || qrOpen}
+            />
+          </AuthCard>
+        </AuthSection>
 
-          <button
-            type="submit"
-            disabled={isLoading || !username.trim()}
-            className="w-full flex items-center justify-center gap-2 rounded-xl bg-primary text-primary-foreground py-3 px-4 font-medium disabled:opacity-50 hover:enabled:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2"
-          >
-            {isLoading ? (
-              <>
-                <Loader2 size={20} className="animate-spin" />
-                Вход...
-              </>
-            ) : (
-              "Войти"
-            )}
-          </button>
-        </form>
+        {scanError ? (
+          <div className="rounded-xl bg-destructive/10 px-4 py-3 text-sm text-destructive">{scanError}</div>
+        ) : null}
+
+        <DeviceLinkQrLoginModal open={qrOpen} onClose={() => setQrOpen(false)} />
+
+        {canScanQr ? (
+          <DeviceLinkQrScannerOverlay
+            open={scannerOpen}
+            onClose={() => setScannerOpen(false)}
+            onCode={(raw) => void onScannedLinkCode(raw)}
+            onError={setScanError}
+            hint="Наведите на QR с авторизованного устройства"
+          />
+        ) : null}
 
         <p className="text-center text-sm text-muted-foreground">
           Нет аккаунта?{" "}
-          <Link href="/auth/register/" className="text-primary font-medium hover:underline">
+          <Link href="/auth/register/" className="font-medium text-primary hover:underline">
             Зарегистрироваться
           </Link>
         </p>
-        </div>
-      </div>
-    </div>
+      </AuthShellBody>
+    </AuthShell>
   );
 }

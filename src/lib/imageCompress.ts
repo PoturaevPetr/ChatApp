@@ -2,6 +2,8 @@
  * Сжатие изображений перед загрузкой на сервер (canvas).
  */
 
+import { isVideoAttachment, normalizeMediaMimeType } from "@/lib/mediaMime";
+
 function readFileAsDataURL(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const r = new FileReader();
@@ -89,24 +91,103 @@ export interface PreparedAttachment {
   name: string;
 }
 
-/** Готовит тело для multipart: для фото — сжатие + превью; для остального — как есть. */
+/** Первый кадр видео как JPEG-превью (для быстрого показа кружка у получателя). */
+export async function extractVideoPosterBlob(file: File, maxSide = 480): Promise<Blob | null> {
+  if (typeof document === "undefined") return null;
+  const url = URL.createObjectURL(file);
+  try {
+    return await new Promise<Blob | null>((resolve) => {
+      const video = document.createElement("video");
+      video.muted = true;
+      video.playsInline = true;
+      video.preload = "auto";
+      let settled = false;
+      const finish = (blob: Blob | null) => {
+        if (settled) return;
+        settled = true;
+        resolve(blob);
+      };
+      const timeout = window.setTimeout(() => finish(null), 12_000);
+      const cleanup = () => window.clearTimeout(timeout);
+      video.onerror = () => {
+        cleanup();
+        finish(null);
+      };
+      video.onloadeddata = () => {
+        try {
+          const dur = video.duration;
+          video.currentTime =
+            Number.isFinite(dur) && dur > 0 ? Math.min(0.08, dur * 0.05) : 0.05;
+        } catch {
+          cleanup();
+          finish(null);
+        }
+      };
+      video.onseeked = () => {
+        cleanup();
+        try {
+          const w = video.videoWidth;
+          const h = video.videoHeight;
+          if (!w || !h) {
+            finish(null);
+            return;
+          }
+          const scale = Math.min(1, maxSide / Math.max(w, h));
+          const cw = Math.max(1, Math.round(w * scale));
+          const ch = Math.max(1, Math.round(h * scale));
+          const canvas = document.createElement("canvas");
+          canvas.width = cw;
+          canvas.height = ch;
+          const ctx = canvas.getContext("2d");
+          if (!ctx) {
+            finish(null);
+            return;
+          }
+          ctx.drawImage(video, 0, 0, cw, ch);
+          canvas.toBlob((b) => finish(b), "image/jpeg", 0.82);
+        } catch {
+          finish(null);
+        }
+      };
+      video.src = url;
+    });
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+/** Готовит тело для multipart: фото — сжатие + превью; видео — poster JPEG; остальное — как есть. */
 export async function prepareAttachmentForUpload(file: File): Promise<PreparedAttachment> {
-  if (!file.type.startsWith("image/")) {
+  const mimeType = normalizeMediaMimeType(file.type || "", file.name);
+  const name = file.name || "file";
+
+  if (file.type.startsWith("image/") || mimeType.startsWith("image/")) {
+    const raw = await readFileAsDataURL(file);
+    const fullDataUrl = await resizeDataUrl(raw, 2048, 0.82);
+    const thumbDataUrl = await resizeDataUrl(raw, 400, 0.68);
     return {
-      full: file,
-      thumb: null,
-      mimeType: file.type || "application/octet-stream",
-      name: file.name,
+      full: dataUrlToBlob(fullDataUrl),
+      thumb: dataUrlToBlob(thumbDataUrl),
+      mimeType: "image/jpeg",
+      name: /\.(jpe?g|png|gif|webp)$/i.test(name) ? name.replace(/\.[^.]+$/, ".jpg") : `${name}.jpg`,
     };
   }
-  const raw = await readFileAsDataURL(file);
-  const fullDataUrl = await resizeDataUrl(raw, 2048, 0.82);
-  const thumbDataUrl = await resizeDataUrl(raw, 400, 0.68);
+
+  if (isVideoAttachment(file.type || mimeType, name)) {
+    const poster = await extractVideoPosterBlob(file).catch(() => null);
+    return {
+      full: file,
+      thumb: poster,
+      mimeType: mimeType.startsWith("video/") ? mimeType : "video/webm",
+      name,
+    };
+  }
+
   return {
-    full: dataUrlToBlob(fullDataUrl),
-    thumb: dataUrlToBlob(thumbDataUrl),
-    mimeType: "image/jpeg",
-    name: /\.(jpe?g|png|gif|webp)$/i.test(file.name) ? file.name.replace(/\.[^.]+$/, ".jpg") : `${file.name}.jpg`,
+    full: file,
+    thumb: null,
+    mimeType,
+    name,
   };
 }
 

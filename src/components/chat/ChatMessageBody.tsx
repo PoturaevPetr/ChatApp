@@ -36,6 +36,12 @@ import { CHAT_MEDIA_PLAY_NEXT, requestPlayNextChatMediaAfter } from "@/lib/chatM
 import { downloadBlobAsFile } from "@/lib/downloadBlob";
 import { chatLocationStaticMapUrl } from "@/lib/chatLocationMap";
 import { ChatLocationMapModal } from "@/components/chat/ChatLocationMapModal";
+import {
+  isAudioAttachment,
+  isImageAttachment,
+  isVideoAttachment,
+  normalizeMediaMimeType,
+} from "@/lib/mediaMime";
 
 /** Останавливаем остальные аудио/видео в чате при старте воспроизведения (detail.playerId — свой id). */
 const CHAT_MEDIA_PLAY = "chatapp:media-play";
@@ -872,11 +878,13 @@ async function ciphertextBlobToObjectUrl(
   mimeType: string,
   key_b64: string | undefined,
   nonce_b64: string | undefined,
+  fileName?: string,
 ): Promise<string> {
   const ab = await blob.arrayBuffer();
+  const normalizedMime = normalizeMediaMimeType(mimeType, fileName);
   if (key_b64 && nonce_b64) {
     const plain = await decryptAttachmentBytes(ab, key_b64, nonce_b64);
-    return URL.createObjectURL(new Blob([plain], { type: mimeType }));
+    return URL.createObjectURL(new Blob([plain], { type: normalizedMime }));
   }
   return URL.createObjectURL(blob);
 }
@@ -979,7 +987,7 @@ function RefLinkedDocumentAttachment({
         });
       });
       setDownloadUi((prev) => (prev ? { ...prev, pct: 99, hint: "Расшифровка…" } : { pct: 99, hint: "Расшифровка…" }));
-      const url = await ciphertextBlobToObjectUrl(blob, file.mimeType, ref.full_key_b64, ref.full_nonce_b64);
+      const url = await ciphertextBlobToObjectUrl(blob, file.mimeType, ref.full_key_b64, ref.full_nonce_b64, file.name);
       setDownloadUi((prev) => (prev ? { ...prev, pct: 100, hint: "Сохранение…" } : { pct: 100, hint: "Сохранение…" }));
       const plainBlob = await fetch(url).then((r) => r.blob());
       URL.revokeObjectURL(url);
@@ -1107,6 +1115,33 @@ export function ChatCircleVideoPlaceholder({
           strokeWidth={2}
           aria-hidden
         />
+      </div>
+    </div>
+  );
+}
+
+export function ChatCircleVideoPoster({
+  src,
+  isOwn,
+  layout = "chat",
+}: {
+  src: string;
+  isOwn: boolean;
+  layout?: "chat" | "grid";
+}) {
+  return (
+    <div className={chatVideoCircleWrapperClassName(isOwn, layout)}>
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={src}
+        alt=""
+        className="h-full w-full object-cover"
+        decoding="async"
+      />
+      <div className="pointer-events-none absolute inset-0 flex items-end justify-center pb-2.5 pt-8" aria-hidden>
+        <div className="rounded-full bg-black/48 px-2.5 py-1.5 text-white shadow-md ring-1 ring-white/15">
+          <Play className="h-4 w-4 translate-x-[1px]" fill="currentColor" aria-hidden />
+        </div>
       </div>
     </div>
   );
@@ -1428,6 +1463,10 @@ function RemoteFileAttachmentInner({
   const [previewErr, setPreviewErr] = useState<string | null>(null);
   const [loadingPreview, setLoadingPreview] = useState(false);
   const ref = file.file_ref;
+  const fileMime = normalizeMediaMimeType(file.mimeType, file.name);
+  const isImage = isImageAttachment(file.mimeType, file.name);
+  const isAudio = isAudioAttachment(file.mimeType, file.name);
+  const isVideo = isVideoAttachment(file.mimeType, file.name);
   const emittedPreviewReadyRef = useRef(false);
   const emittedFullReadyRef = useRef(false);
   const messageTsRef = useRef(messageTimestamp);
@@ -1485,10 +1524,17 @@ function RemoteFileAttachmentInner({
     void (async () => {
       try {
         const tokens = await getValidAuthTokens();
-        if (!tokens?.access_token || cancelled) return;
+        if (!tokens?.access_token || cancelled) {
+          if (!cancelled) {
+            setPreviewErr("Нет авторизации");
+            setLoadingPreview(false);
+          }
+          return;
+        }
+        const decryptMime = useThumbKeys ? "image/jpeg" : fileMime;
         const url = await runWithMediaLoadLimit(async () => {
           const blob = await fetchAttachmentBlob(tokens.access_token, previewId);
-          return ciphertextBlobToObjectUrl(blob, file.mimeType, keyB64, nonceB64);
+          return ciphertextBlobToObjectUrl(blob, decryptMime, keyB64, nonceB64, file.name);
         }, mediaPriority);
         if (cancelled) {
           URL.revokeObjectURL(url);
@@ -1533,9 +1579,11 @@ function RemoteFileAttachmentInner({
 
   useEffect(() => {
     if (!shouldLoadMedia) return;
-    if (!ref || !previewUrl || !file.mimeType.startsWith("image/")) return;
-    if (!ref.thumb_attachment_id) return;
+    if (!ref || !previewUrl) return;
     if (!ref.full_key_b64 || !ref.full_nonce_b64) return;
+    const needsFullImage = isImage && Boolean(ref.thumb_attachment_id);
+    const needsFullVideo = isVideo && Boolean(ref.thumb_attachment_id);
+    if (!needsFullImage && !needsFullVideo) return;
     let cancelled = false;
     let fullLease: { key: string; url: string } | null = null;
     const releaseFullLease = () => {
@@ -1569,7 +1617,7 @@ function RemoteFileAttachmentInner({
           if (!tokens?.access_token || cancelled) return;
           const url = await runWithMediaLoadLimit(async () => {
             const blob = await fetchAttachmentBlob(tokens.access_token, ref.attachment_id);
-            return ciphertextBlobToObjectUrl(blob, file.mimeType, ref.full_key_b64, ref.full_nonce_b64);
+            return ciphertextBlobToObjectUrl(blob, fileMime, ref.full_key_b64, ref.full_nonce_b64, file.name);
           }, mediaPriority);
           if (cancelled) {
             URL.revokeObjectURL(url);
@@ -1607,11 +1655,10 @@ function RemoteFileAttachmentInner({
     ref?.full_nonce_b64,
     Boolean(previewUrl),
     file.mimeType,
+    file.name,
+    isImage,
+    isVideo,
   ]);
-
-  const isImage = file.mimeType.startsWith("image/");
-  const isAudio = file.mimeType.startsWith("audio/");
-  const isVideo = file.mimeType.startsWith("video/");
 
   if (!shouldLoadMedia) {
     if (inlineDisplayUrl) {
@@ -1767,20 +1814,28 @@ function RemoteFileAttachmentInner({
     );
   }
 
-  if (isVideo && previewUrl) {
+  if (isVideo) {
+    const videoSrc = fullUrl || (!ref?.thumb_attachment_id ? previewUrl : null);
+    const posterSrc = ref?.thumb_attachment_id && previewUrl && !fullUrl ? previewUrl : null;
     return (
       <div ref={containerRef} className={videoMessageColumnClass(isOwn)}>
         {text ? (
-              <MessageTextWithLinks text={text} isOwn={isOwn} paragraphClassName={videoCaptionClass(true)} />
-            ) : null}
-        <ChatCircleVideo
-          src={previewUrl}
-          isOwn={isOwn}
-          fileName={file.name}
-          uploadProgress={videoUploadProgress}
-          messageId={messageId}
-          sequencePlayback={sequencePlayback}
-        />
+          <MessageTextWithLinks text={text} isOwn={isOwn} paragraphClassName={videoCaptionClass(true)} />
+        ) : null}
+        {videoSrc ? (
+          <ChatCircleVideo
+            src={videoSrc}
+            isOwn={isOwn}
+            fileName={file.name}
+            uploadProgress={videoUploadProgress}
+            messageId={messageId}
+            sequencePlayback={sequencePlayback}
+          />
+        ) : posterSrc ? (
+          <ChatCircleVideoPoster src={posterSrc} isOwn={isOwn} />
+        ) : (
+          <ChatCircleVideoPlaceholder isOwn={isOwn} />
+        )}
       </div>
     );
   }
@@ -1801,6 +1856,31 @@ function RemoteFileAttachmentInner({
         >
           {file.name}
         </button>
+      </div>
+    );
+  }
+
+  if (isVideo) {
+    return (
+      <div ref={containerRef} className={videoMessageColumnClass(isOwn)}>
+        {text ? (
+          <MessageTextWithLinks text={text} isOwn={isOwn} paragraphClassName={videoCaptionClass(true)} />
+        ) : null}
+        <ChatCircleVideoPlaceholder isOwn={isOwn} />
+      </div>
+    );
+  }
+
+  if (isAudio) {
+    return (
+      <div ref={containerRef} className="space-y-0.5">
+        {text ? <MessageTextWithLinks text={text} isOwn={isOwn} /> : null}
+        <div
+          className={`flex min-h-[52px] w-full max-w-[min(100%,280px)] items-center rounded-2xl border px-3 ${
+            isOwn ? "border-primary/35 bg-primary/10" : "border-border/60 bg-muted/30"
+          }`}
+          aria-hidden
+        />
       </div>
     );
   }
@@ -1879,7 +1959,9 @@ function RemoteFileAttachment(
   const ref = props.file.file_ref;
   const m = props.file.mimeType || "";
   const loadMediaRemotely =
-    m.startsWith("image/") || m.startsWith("audio/") || m.startsWith("video/");
+    isImageAttachment(m, props.file.name) ||
+    isAudioAttachment(m, props.file.name) ||
+    isVideoAttachment(m, props.file.name);
   if (ref && !loadMediaRemotely) {
     return <RefLinkedDocumentAttachment file={props.file} text={props.text} isOwn={props.isOwn} />;
   }
@@ -1937,8 +2019,8 @@ export function MessageBody({
             />
           );
         }
-        const mtLocal = file.mimeType.toLowerCase();
-        if (file.localPreviewUrl && mtLocal.startsWith("image/")) {
+        const mtLocal = normalizeMediaMimeType(file.mimeType, file.name);
+        if (file.localPreviewUrl && isImageAttachment(file.mimeType, file.name)) {
           return (
             <div className="space-y-0.5">
               {text ? <MessageTextWithLinks text={text} isOwn={isOwn} /> : null}
@@ -1946,7 +2028,7 @@ export function MessageBody({
             </div>
           );
         }
-        if (file.localPreviewUrl && mtLocal.startsWith("audio/")) {
+        if (file.localPreviewUrl && isAudioAttachment(file.mimeType, file.name)) {
           return (
             <div className="space-y-0.5">
               <AudioPlayer
@@ -1960,7 +2042,7 @@ export function MessageBody({
             </div>
           );
         }
-        if (file.localPreviewUrl && mtLocal.startsWith("video/")) {
+        if (file.localPreviewUrl && isVideoAttachment(file.mimeType, file.name)) {
           return (
             <div className={videoMessageColumnClass(isOwn)}>
               {text ? (
@@ -1979,10 +2061,9 @@ export function MessageBody({
         }
         const mediaLoading = !file.data || file.data.length === 0;
         if (mediaLoading) {
-          const mt = file.mimeType.toLowerCase();
-          const loadingVideo = mt.startsWith("video/");
-          const loadingImage = mt.startsWith("image/");
-          const loadingAudio = mt.startsWith("audio/");
+          const loadingVideo = isVideoAttachment(file.mimeType, file.name);
+          const loadingImage = isImageAttachment(file.mimeType, file.name);
+          const loadingAudio = isAudioAttachment(file.mimeType, file.name);
           return (
             <div className={loadingVideo ? videoMessageColumnClass(isOwn) : "space-y-0.5"}>
               {text ? (
@@ -2032,10 +2113,10 @@ export function MessageBody({
             </div>
           );
         }
-        const dataUrl = `data:${file.mimeType};base64,${file.data}`;
-        const isImage = file.mimeType.startsWith("image/");
-        const isAudio = file.mimeType.startsWith("audio/");
-        const isVideo = file.mimeType.startsWith("video/");
+        const dataUrl = `data:${normalizeMediaMimeType(file.mimeType, file.name)};base64,${file.data}`;
+        const isImage = isImageAttachment(file.mimeType, file.name);
+        const isAudio = isAudioAttachment(file.mimeType, file.name);
+        const isVideo = isVideoAttachment(file.mimeType, file.name);
         if (isVideo) {
           return (
             <div className={videoMessageColumnClass(isOwn)}>

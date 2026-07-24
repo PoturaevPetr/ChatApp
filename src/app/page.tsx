@@ -14,12 +14,15 @@ import {
 } from "@/lib/chatOverlayEvents";
 import { AI_ASSISTANT_QUERY_VALUE } from "@/lib/aiAssistantConstants";
 import { useMediaMinMd } from "@/hooks/useMediaMinMd";
+import { useLlmAccessStore } from "@/stores/llmAccessStore";
 import { chatListSidebarMd } from "@/lib/chatListSidebar";
 
 function HomeInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const isWide = useMediaMinMd();
+  const llmEnabled = useLlmAccessStore((s) => s.enabled);
+  const llmHydrated = useLlmAccessStore((s) => s.hydrated);
   const aiOverlayOpen = searchParams.get("ai")?.trim() === AI_ASSISTANT_QUERY_VALUE;
   const threadOverlayOpen = !!(
     searchParams.get("roomId")?.trim() ||
@@ -30,6 +33,12 @@ function HomeInner() {
   const [slideEntered, setSlideEntered] = useState(false);
   const [slideExiting, setSlideExiting] = useState(false);
   const exitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (aiOverlayOpen && llmHydrated && !llmEnabled) {
+      router.replace("/");
+    }
+  }, [aiOverlayOpen, llmHydrated, llmEnabled, router]);
 
   useEffect(() => {
     if (!threadOverlayOpen) {

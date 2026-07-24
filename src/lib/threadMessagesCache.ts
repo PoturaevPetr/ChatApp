@@ -149,6 +149,29 @@ export function scheduleThreadMessagesCacheWrite(
   );
 }
 
+/** Thread ids known in the local disk index for this user. */
+export async function listCachedThreadIds(userId: string): Promise<string[]> {
+  const uid = userId.trim().toLowerCase();
+  if (!uid) return [];
+  try {
+    const raw = await storageGet(indexKey(uid));
+    if (!raw) return [];
+    const p = JSON.parse(raw) as unknown;
+    if (!Array.isArray(p)) return [];
+    return p.filter((t): t is string => typeof t === "string");
+  } catch {
+    return [];
+  }
+}
+
+export async function writeThreadMessagesCacheImmediate(
+  userId: string,
+  threadId: string,
+  snapshot: Omit<ThreadMessagesDiskSnapshot, "userId" | "threadId" | "savedAt">,
+): Promise<void> {
+  await writeThreadMessagesCache(userId, threadId, snapshot);
+}
+
 export async function readThreadMessagesCache(
   userId: string,
   threadId: string,

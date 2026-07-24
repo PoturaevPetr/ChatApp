@@ -8,6 +8,11 @@ const BASE_URL =
     ? (process.env.NEXT_PUBLIC_CHAT_API_URL || "https://chat.pirogov.ai")
     : "https://chat.pirogov.ai";
 
+export interface DeviceEnvelopeResponse {
+  device_id: string;
+  encrypted_aes_key: string;
+}
+
 export interface MessageResponse {
   message_id: string;
   sender_id: string;
@@ -21,6 +26,21 @@ export interface MessageResponse {
   sent_at: string;
   /** true если в списке не отдали тело (большое); полное тело — по getMessage(id) */
   has_attachment?: boolean;
+  device_envelopes?: DeviceEnvelopeResponse[] | null;
+}
+
+async function authHeaders(accessToken: string): Promise<Record<string, string>> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${accessToken}`,
+  };
+  try {
+    const { getOrCreateLocalDeviceId } = await import("@/lib/deviceIdentity");
+    const deviceId = await getOrCreateLocalDeviceId();
+    if (deviceId) headers["X-Device-Id"] = deviceId;
+  } catch {
+    /* ignore */
+  }
+  return headers;
 }
 
 /** Получить одно сообщение по id (всегда полное тело, для подгрузки при has_attachment). */
@@ -31,7 +51,7 @@ export async function getMessage(
   const url = `${BASE_URL.replace(/\/$/, "")}/api/v1/messages/${encodeURIComponent(messageId)}`;
   const res = await fetch(url, {
     method: "GET",
-    headers: { Authorization: `Bearer ${accessToken}` },
+    headers: await authHeaders(accessToken),
   });
   if (!res.ok) return null;
   const data = (await res.json()) as MessageResponse;
@@ -72,9 +92,7 @@ export async function getMessages(
 
   const res = await fetch(url.toString(), {
     method: "GET",
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
+    headers: await authHeaders(accessToken),
   });
 
   if (!res.ok) {

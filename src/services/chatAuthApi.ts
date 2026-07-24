@@ -19,13 +19,14 @@ export interface RegisterRequest {
   middle_name: string;
   birth_date: string; // YYYY-MM-DD
   avatar?: string;
+  /** PEM public key (клиентская генерация) */
+  public_key: string;
 }
 
 export interface RegisterResponse {
   user_id: string;
   username: string;
   public_key: string;
-  private_key: string;
   access_token: string;
   refresh_token: string;
 }
@@ -41,6 +42,43 @@ export interface LoginResponse {
   refresh_token: string;
   user_id: string;
   username: string;
+}
+
+export interface DeviceLinkExchangeRequest {
+  code: string;
+  service_id?: string;
+  device_id: string;
+  name?: string | null;
+  platform: string;
+  identity_key_public: string;
+  signal_identity_key_public?: string;
+  registration_id: number;
+  signed_prekey_id?: number;
+  signed_prekey_public?: string;
+  signed_prekey_signature?: string;
+  one_time_prekeys?: { key_id: number; public_key: string }[];
+}
+
+export interface DeviceLinkExchangeResponse extends LoginResponse {
+  linked: boolean;
+  device_id: string;
+}
+
+export type DeviceLinkRegisterBody = Omit<DeviceLinkExchangeRequest, "code" | "service_id">;
+
+export interface DeviceLinkRequestResponse {
+  request_id: string;
+  code: string;
+  expires_at: string;
+  qr_payload: string;
+}
+
+export interface DeviceLinkPollResponse {
+  status: "pending" | "approved" | "expired";
+  access_token?: string;
+  refresh_token?: string;
+  user_id?: string;
+  username?: string;
 }
 
 export interface RefreshTokenRequest {
@@ -69,6 +107,7 @@ export interface OAuthExchangeRequest {
   code: string;
   redirect_uri: string;
   service_id?: string;
+  public_key?: string;
 }
 
 export interface OAuthExchangeResponse {
@@ -78,7 +117,6 @@ export interface OAuthExchangeResponse {
   username: string;
   is_new_user: boolean;
   public_key?: string;
-  private_key?: string;
 }
 
 /** Ответ GET /auth/me — текущий пользователь */
@@ -165,7 +203,9 @@ async function authRequest<T>(path: string, accessToken: string): Promise<T> {
 }
 
 export const chatAuthApi = {
-  async register(data: Omit<RegisterRequest, "service_id" | "avatar">): Promise<RegisterResponse> {
+  async register(
+    data: Omit<RegisterRequest, "service_id" | "avatar"> & { public_key?: string }
+  ): Promise<RegisterResponse> {
     const body: RegisterRequest = {
       ...data,
       service_id: SERVICE_ID,
@@ -183,6 +223,30 @@ export const chatAuthApi = {
     });
   },
 
+  /** Вход по QR/коду с доверенного устройства (без JWT). */
+  async deviceLinkExchange(
+    body: Omit<DeviceLinkExchangeRequest, "service_id">,
+  ): Promise<DeviceLinkExchangeResponse> {
+    return request<DeviceLinkExchangeResponse>("/api/v1/auth/device-link/exchange", {
+      method: "POST",
+      body: { ...body, service_id: SERVICE_ID },
+    });
+  },
+
+  /** Desktop: показать QR, ждать approve с телефона. */
+  async deviceLinkRequest(body: DeviceLinkRegisterBody): Promise<DeviceLinkRequestResponse> {
+    return request<DeviceLinkRequestResponse>("/api/v1/auth/device-link/request", {
+      method: "POST",
+      body: body as unknown as Record<string, unknown>,
+    });
+  },
+
+  async deviceLinkPoll(requestId: string): Promise<DeviceLinkPollResponse> {
+    return getJson<DeviceLinkPollResponse>(
+      `/api/v1/auth/device-link/poll/${encodeURIComponent(requestId)}`,
+    );
+  },
+
   async refresh(refresh_token: string): Promise<RefreshTokenResponse> {
     return request<RefreshTokenResponse>("/api/v1/auth/refresh", {
       method: "POST",
@@ -190,14 +254,24 @@ export const chatAuthApi = {
     });
   },
 
+  /** Список включённых OAuth-провайдеров с бэкенда. GET /auth/oauth/providers */
+  async oauthProviders(): Promise<OAuthProvidersResponse> {
+    const url = `${BASE_URL.replace(/\/$/, "")}/api/v1/auth/oauth/providers`;
+    const res = await fetch(url, { method: "GET", cache: "no-store" });
+    const data = await res.json().catch(() => ({}));
+    const detail =
+      typeof (data as { detail?: string }).detail === "string"
+        ? (data as { detail: string }).detail
+        : undefined;
+    if (!res.ok) {
+      throw new ChatAuthApiError(detail || res.statusText || `HTTP ${res.status}`, res.status, detail);
+    }
+    return data as OAuthProvidersResponse;
+  },
+
   /** Текущий пользователь. GET /auth/me */
   async getMe(accessToken: string): Promise<MeResponse> {
     return authRequest<MeResponse>("/api/v1/auth/me", accessToken);
-  },
-
-  /** Обновление данных пользователя. POST /auth/update */
-  async oauthProviders(): Promise<OAuthProvidersResponse> {
-    return getJson<OAuthProvidersResponse>("/api/v1/auth/oauth/providers");
   },
 
   async getOAuthAuthorizeUrl(provider: OAuthProviderId, redirectUri: string, state: string): Promise<OAuthAuthorizeUrlResponse> {
@@ -216,6 +290,7 @@ export const chatAuthApi = {
       redirect_uri: body.redirect_uri,
       service_id: body.service_id ?? SERVICE_ID,
     };
+    if (body.public_key) payload.public_key = body.public_key;
     return request<OAuthExchangeResponse>("/api/v1/auth/oauth/exchange", {
       method: "POST",
       body: payload,

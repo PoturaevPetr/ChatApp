@@ -1,7 +1,8 @@
-import { decryptMessage } from "@/lib/decryptMessage";
+import { decryptMessageForDevice } from "@/lib/decryptMessage";
 import { getMessage, getMessages, type MessageResponse } from "@/services/chatMessagesApi";
 import { getRooms, type Room } from "@/services/chatRoomsApi";
 import { buildMessageContentFromDecrypt, type ChatMessageContent, type ChatMessageFile } from "@/stores/chatStore";
+import { getOrCreateLocalDeviceId } from "@/lib/deviceIdentity";
 
 const PAGE_SIZE = 100;
 /** Ограничение глубины истории при сборе вложений (страницы по PAGE_SIZE). */
@@ -55,8 +56,13 @@ async function decryptMessageContent(
       if (!full) return null;
       m = full;
     }
-    if (!m.encrypted_data || !m.encrypted_aes_key || !m.nonce) return null;
-    const raw = await decryptMessage(m.encrypted_data, m.encrypted_aes_key, m.nonce, privateKeyPem);
+    if (!m.encrypted_data || !m.nonce) return null;
+    const localDeviceId = await getOrCreateLocalDeviceId().catch(() => null);
+    const raw = await decryptMessageForDevice(m.encrypted_data, m.nonce, privateKeyPem, {
+      encryptedAesKey: m.encrypted_aes_key,
+      deviceEnvelopes: m.device_envelopes,
+      localDeviceId,
+    });
     return buildMessageContentFromDecrypt(raw as Record<string, unknown> | null);
   } catch {
     return null;

@@ -6,6 +6,8 @@ import Link from "next/link";
 import { Loader2, ArrowLeft } from "lucide-react";
 import { chatAuthApi, ChatAuthApiError, type OAuthProviderId } from "@/services/chatAuthApi";
 import { useAuthStore } from "@/stores/authStore";
+import { getOrCreateLocalDeviceIdentity } from "@/lib/deviceIdentity";
+import type { StoredChatKeys } from "@/lib/secureStorage";
 
 const OAUTH_STATE_KEY = "oauth_state";
 const OAUTH_PROVIDER_KEY = "oauth_provider";
@@ -53,14 +55,21 @@ export default function OAuthCallbackPage() {
 
     void (async () => {
       try {
+        // Per-device identity (CRYPTO_DEVICES_V3) — private в secure storage
+        const identity = await getOrCreateLocalDeviceIdentity();
+        const clientKeys: StoredChatKeys = {
+          public_key: identity.publicKeyPem,
+          private_key: identity.privateKeyPem,
+        };
         const res = await chatAuthApi.oauthExchange({
           provider,
           code,
           redirect_uri: redirectUri,
+          public_key: identity.publicKeyPem,
         });
         sessionStorage.removeItem(OAUTH_STATE_KEY);
         sessionStorage.removeItem(OAUTH_PROVIDER_KEY);
-        await completeOAuthLogin(res);
+        await completeOAuthLogin(res, res.is_new_user ? clientKeys : null);
         router.replace("/");
       } catch (e) {
         sessionStorage.removeItem(OAUTH_STATE_KEY);

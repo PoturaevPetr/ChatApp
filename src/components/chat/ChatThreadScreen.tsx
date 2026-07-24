@@ -23,11 +23,15 @@ import {
   Phone,
   PhoneOff,
   Sparkles,
+  Settings,
 } from "lucide-react";
 import { AuthGuard } from "@/components/AuthGuard";
 import { Layout } from "@/components/Layout";
 import { EmojiKeyboardPanel, EmojiKeyboardTrigger } from "@/components/EmojiPicker";
 import { AttachFileModal } from "@/components/AttachFileModal";
+import { AttachFileDesktopMenu } from "@/components/AttachFileDesktopMenu";
+import { ComposerUpwardPopover } from "@/components/ComposerUpwardPopover";
+import { useMediaMinMd } from "@/hooks/useMediaMinMd";
 import { ShareLocationModal } from "@/components/ShareLocationModal";
 import { useAuthStore } from "@/stores/authStore";
 import {
@@ -54,12 +58,17 @@ import {
   type ChatAnalysisPeriodHours,
 } from "@/lib/messageAnalysis";
 import { ChatPeriodAnalysisModal } from "@/components/chat/ChatPeriodAnalysisModal";
+import { ChatWallpaperLayer } from "@/components/chat/ChatWallpaperLayer";
+import { ChatSettingsSheet } from "@/components/chat/ChatSettingsSheet";
+import { ChatWallpaperPickerSheet } from "@/components/chat/ChatWallpaperPickerSheet";
 import { useAiAssistantStore } from "@/stores/aiAssistantStore";
-import { deleteRoom, leaveRoom } from "@/services/chatRoomsApi";
+import { useLlmAccessStore } from "@/stores/llmAccessStore";
+import { deleteRoom, leaveRoom, patchRoomMe } from "@/services/chatRoomsApi";
 import { deleteMessage as deleteMessageOnServer } from "@/services/chatMessagesApi";
 import { setMessageReaction } from "@/services/chatReactionsApi";
 import { getUserById } from "@/services/chatUsersApi";
 import { formatPeerPresenceLabel } from "@/lib/formatPeerPresence";
+import { getInitials } from "@/lib/getInitials";
 import { ChatMessageBubble } from "@/components/chat/ChatMessageBubble";
 import { MessageActionsOverlay } from "@/components/chat/MessageActionsOverlay";
 import { Capacitor, type PluginListenerHandle } from "@capacitor/core";
@@ -173,6 +182,8 @@ const RECORD_HOLD_DELAY_MS = 220;
 const MIN_RECORDED_MEDIA_BYTES = 800;
 /** Максимальная длительность видеосообщения-кружка (запись обрывается автоматически). */
 const MAX_VIDEO_CIRCLE_RECORDING_MS = 40_000;
+/** Зазор между последним сообщением и закреплённым блоком ввода. */
+const COMPOSER_SCROLL_GAP_PX = 12;
 
 /** Кружок: умеренное разрешение — меньше цифровой «зум»/кроп на телефонах, меньше файл. */
 const VIDEO_CIRCLE_WIDTH_IDEAL = 480;
@@ -341,6 +352,7 @@ export type ChatThreadScreenMode = "standalone" | "embedded";
  * Экран переписки: embedded — полноэкранный слой на «/» поверх списка; standalone — обёртка с Layout (резерв).
  */
 export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScreenMode }) {
+  const isDesktopComposer = useMediaMinMd();
   const keyboardInset = useVisualViewportKeyboardInset();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -368,6 +380,7 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
     removeMessageFromActiveChat,
     applyMessageReaction,
     peerTyping,
+    setChatNotificationsEnabled,
   } = useChatStore();
   const isSocketConnected = useWebSocketStore((s) => s.isConnected);
   const ensureConnected = useWebSocketStore((s) => s.ensureConnected);
@@ -401,11 +414,17 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
   const [isMessageAnalyzing, setIsMessageAnalyzing] = useState(false);
   const [chatPeriodAnalysisOpen, setChatPeriodAnalysisOpen] = useState(false);
   const [isChatPeriodAnalysisRunning, setIsChatPeriodAnalysisRunning] = useState(false);
+  const [chatSettingsOpen, setChatSettingsOpen] = useState(false);
+  const [wallpaperPickerOpen, setWallpaperPickerOpen] = useState(false);
+  const [notificationsBusy, setNotificationsBusy] = useState(false);
   const queueMessageAnalysis = useAiAssistantStore((s) => s.queueMessageAnalysis);
+  const llmEnabled = useLlmAccessStore((s) => s.enabled);
   const [deleteMessageTarget, setDeleteMessageTarget] = useState<ChatMessage | null>(null);
   const [isDeletingMessage, setIsDeletingMessage] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [composerInsetPx, setComposerInsetPx] = useState(96);
   /** После подгрузки старых сообщений восстанавливаем позицию скролла (сохраняем «якорь» по высоте). */
   const pendingOlderScrollRestoreRef = useRef<{ prevScrollHeight: number; prevScrollTop: number } | null>(
     null,
@@ -413,6 +432,11 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
   const didInitialScrollRef = useRef(false);
   const mediaAutoscrollUntilRef = useRef(0);
   const userTouchedScrollRef = useRef(false);
+  const bottomAnchorMessageIdRef = useRef<string | null>(null);
+  const pendingBelowCountRef = useRef(0);
+  const scrollAfterOwnSendRef = useRef(false);
+  const lastOwnMessageIdForScrollRef = useRef<string | null>(null);
+  const [pendingBelowCount, setPendingBelowCountState] = useState(0);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const composerInputFocusedRef = useRef(false);
@@ -423,6 +447,8 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
   const lastTypingSentAtRef = useRef(0);
   const emojiKeyboardOpenRef = useRef(false);
   const attachModalOpenRef = useRef(false);
+  const attachBtnRef = useRef<HTMLButtonElement>(null);
+  const emojiBtnRef = useRef<HTMLButtonElement>(null);
   /** Портал модалки «Прикрепить» только в область чата (embedded). */
   const threadShellRef = useRef<HTMLDivElement>(null);
   const shareLocationOpenRef = useRef(false);
@@ -743,27 +769,99 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
     mediaAutoscrollUntilRef.current = 0;
     userTouchedScrollRef.current = false;
     pendingOlderScrollRestoreRef.current = null;
+    bottomAnchorMessageIdRef.current = null;
+    pendingBelowCountRef.current = 0;
+    scrollAfterOwnSendRef.current = false;
+    lastOwnMessageIdForScrollRef.current = null;
+    setPendingBelowCountState(0);
     setShowScrollToBottom(false);
   }, [threadPeerId]);
+
+  const setPendingBelowCount = useCallback((count: number) => {
+    pendingBelowCountRef.current = count;
+    setPendingBelowCountState(count);
+  }, []);
+
+  const getDistanceFromBottom = useCallback((scroller: HTMLDivElement) => {
+    return scroller.scrollHeight - (scroller.scrollTop + scroller.clientHeight);
+  }, []);
+
+  const scrollMessagesPaddingBottom = useMemo(
+    () => `calc(${composerInsetPx + COMPOSER_SCROLL_GAP_PX}px + ${keyboardInset}px)`,
+    [composerInsetPx, keyboardInset],
+  );
+
+  const jumpToBottomButtonBottom = useMemo(
+    () => `calc(${composerInsetPx + COMPOSER_SCROLL_GAP_PX + 8}px + ${keyboardInset}px)`,
+    [composerInsetPx, keyboardInset],
+  );
+
+  const scrollThreadToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
+    const sc = scrollRef.current;
+    if (!sc) return;
+    const maxTop = Math.max(0, sc.scrollHeight - sc.clientHeight);
+    if (behavior === "smooth") {
+      sc.scrollTo({ top: maxTop, behavior: "smooth" });
+    } else {
+      sc.scrollTop = maxTop;
+    }
+  }, []);
+
+  useLayoutEffect(() => {
+    const node = composerRef.current;
+    if (!node) return;
+    const measure = () => {
+      const h = node.getBoundingClientRect().height;
+      if (h > 0) setComposerInsetPx(Math.ceil(h));
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(node);
+    return () => ro.disconnect();
+  }, [threadPeerId, keyboardInset]);
+
+  useLayoutEffect(() => {
+    const sc = scrollRef.current;
+    if (!sc) return;
+    const nearBottom = getDistanceFromBottom(sc) < 160;
+    if (nearBottom || mediaAutoscrollUntilRef.current > Date.now()) {
+      scrollThreadToBottom("auto");
+    }
+  }, [composerInsetPx, getDistanceFromBottom, scrollThreadToBottom]);
 
   const updateScrollToBottomVisibility = useCallback(() => {
     const scroller = scrollRef.current;
     if (!scroller) return;
-    const distanceFromBottom = scroller.scrollHeight - (scroller.scrollTop + scroller.clientHeight);
-    setShowScrollToBottom(distanceFromBottom > 140);
-  }, []);
+    const distanceFromBottom = getDistanceFromBottom(scroller);
+    const atBottom = distanceFromBottom < 120;
+    if (atBottom) {
+      bottomAnchorMessageIdRef.current =
+        useChatStore.getState().activeChatMessages.at(-1)?.id ?? null;
+      setPendingBelowCount(0);
+    }
+    setShowScrollToBottom(distanceFromBottom > 140 || pendingBelowCountRef.current > 0);
+  }, [getDistanceFromBottom, setPendingBelowCount]);
+
+  const scrollToBottomAndClear = useCallback(() => {
+    userTouchedScrollRef.current = false;
+    scrollThreadToBottom("smooth");
+    bottomAnchorMessageIdRef.current =
+      useChatStore.getState().activeChatMessages.at(-1)?.id ?? null;
+    setPendingBelowCount(0);
+    setShowScrollToBottom(false);
+  }, [scrollThreadToBottom, setPendingBelowCount]);
 
   /** После своей отправки всегда к низу (обход ограничения «только если уже рядом с низом»). */
   const scrollThreadToBottomAfterSend = useCallback(() => {
+    scrollAfterOwnSendRef.current = true;
     userTouchedScrollRef.current = false;
     mediaAutoscrollUntilRef.current = Date.now() + 3000;
     const bump = () => {
-      const sc = scrollRef.current;
-      if (sc) {
-        sc.scrollTop = Math.max(0, sc.scrollHeight - sc.clientHeight);
-      }
-      bottomRef.current?.scrollIntoView({ block: "end", behavior: "auto" });
-      updateScrollToBottomVisibility();
+      scrollThreadToBottom("auto");
+      bottomAnchorMessageIdRef.current =
+        useChatStore.getState().activeChatMessages.at(-1)?.id ?? null;
+      setPendingBelowCount(0);
+      setShowScrollToBottom(false);
     };
     bump();
     requestAnimationFrame(bump);
@@ -771,7 +869,8 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
     window.setTimeout(bump, 40);
     window.setTimeout(bump, 120);
     window.setTimeout(bump, 280);
-  }, [updateScrollToBottomVisibility]);
+    window.setTimeout(bump, 500);
+  }, [scrollThreadToBottom, setPendingBelowCount]);
 
   const handleMessagesScroll = useCallback(() => {
     const scroller = scrollRef.current;
@@ -800,10 +899,20 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
     }
   }, [activeChatMessages, isLoadingOlderMessages]);
 
+  useLayoutEffect(() => {
+    if (!scrollAfterOwnSendRef.current) return;
+    scrollAfterOwnSendRef.current = false;
+    scrollThreadToBottom("auto");
+    const last = activeChatMessages.at(-1);
+    bottomAnchorMessageIdRef.current = last?.id ?? null;
+    if (last?.isOwn) lastOwnMessageIdForScrollRef.current = last.id;
+    setPendingBelowCount(0);
+    setShowScrollToBottom(false);
+  }, [activeChatMessages, scrollThreadToBottom, setPendingBelowCount]);
+
   useEffect(() => {
     const scroller = scrollRef.current;
-    const bottom = bottomRef.current;
-    if (!bottom) return;
+    if (!bottomRef.current) return;
     /** Пока нет ни одного сообщения — ждём; из кэша лента уже есть — скроллим к низу даже при догрузке с API. */
     if (isMessagesLoading && activeChatMessages.length === 0) return;
 
@@ -811,41 +920,65 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
       // Wait until we actually have messages rendered; otherwise we "lock in" the flag too early.
       if (activeChatMessages.length === 0) return;
       didInitialScrollRef.current = true;
-      bottom.scrollIntoView({ behavior: "auto" });
+      bottomAnchorMessageIdRef.current = activeChatMessages.at(-1)?.id ?? null;
+      const initialLast = activeChatMessages.at(-1);
+      if (initialLast?.isOwn) lastOwnMessageIdForScrollRef.current = initialLast.id;
+      scrollThreadToBottom("auto");
       // Коротко фиксируем "низ" после открытия, чтобы догрузка медиа не уводила от актуальных сообщений.
       mediaAutoscrollUntilRef.current = Date.now() + 2000;
+      setPendingBelowCount(0);
       updateScrollToBottomVisibility();
       return;
     }
 
     if (!scroller) {
-      bottom.scrollIntoView({ behavior: "smooth" });
+      scrollThreadToBottom("smooth");
       return;
     }
 
-    const distanceFromBottom = scroller.scrollHeight - (scroller.scrollTop + scroller.clientHeight);
+    const lastMsg = activeChatMessages.at(-1);
+    if (lastMsg?.isOwn && lastMsg.id !== lastOwnMessageIdForScrollRef.current) {
+      lastOwnMessageIdForScrollRef.current = lastMsg.id;
+      userTouchedScrollRef.current = false;
+      mediaAutoscrollUntilRef.current = Date.now() + 3000;
+      scrollThreadToBottom("auto");
+      bottomAnchorMessageIdRef.current = lastMsg.id;
+      setPendingBelowCount(0);
+      setShowScrollToBottom(false);
+      return;
+    }
+
+    const distanceFromBottom = getDistanceFromBottom(scroller);
     const isNearBottom = distanceFromBottom < 120;
     if (isNearBottom) {
-      bottom.scrollIntoView({ behavior: "smooth" });
+      scrollThreadToBottom("smooth");
+      bottomAnchorMessageIdRef.current = activeChatMessages.at(-1)?.id ?? null;
+      setPendingBelowCount(0);
+      setShowScrollToBottom(false);
+    } else {
+      const anchorIdx = activeChatMessages.findIndex(
+        (m) => m.id === bottomAnchorMessageIdRef.current,
+      );
+      const belowCount = anchorIdx === -1 ? 0 : activeChatMessages.length - 1 - anchorIdx;
+      setPendingBelowCount(belowCount);
+      setShowScrollToBottom(distanceFromBottom > 140 || belowCount > 0);
     }
-    updateScrollToBottomVisibility();
-  }, [activeChatMessages, isMessagesLoading]);
+  }, [activeChatMessages, isMessagesLoading, getDistanceFromBottom, setPendingBelowCount, updateScrollToBottomVisibility, scrollThreadToBottom]);
 
   useEffect(() => {
     const onMediaReady = () => {
       const scroller = scrollRef.current;
-      const bottom = bottomRef.current;
-      if (!scroller || !bottom) return;
+      if (!scroller) return;
       if (Date.now() > mediaAutoscrollUntilRef.current) return;
       if (userTouchedScrollRef.current) return;
 
       // Во время краткой фиксации всегда держим низ, пока пользователь не начал скроллить вручную.
-      bottom.scrollIntoView({ behavior: "auto" });
+      scrollThreadToBottom("auto");
       updateScrollToBottomVisibility();
     };
     window.addEventListener("chatapp:media-ready", onMediaReady as EventListener);
     return () => window.removeEventListener("chatapp:media-ready", onMediaReady as EventListener);
-  }, [updateScrollToBottomVisibility]);
+  }, [updateScrollToBottomVisibility, scrollThreadToBottom]);
 
   const markUserTouchedScroll = useCallback(() => {
     userTouchedScrollRef.current = true;
@@ -1017,9 +1150,9 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
   useEffect(() => {
     if (!emojiKeyboardOpen) return;
     requestAnimationFrame(() => {
-      bottomRef.current?.scrollIntoView({ block: "end", behavior: "smooth" });
+      scrollThreadToBottom("smooth");
     });
-  }, [emojiKeyboardOpen]);
+  }, [emojiKeyboardOpen, scrollThreadToBottom]);
 
   useEffect(() => {
     if (attachModalOpen || shareLocationOpen) setEmojiKeyboardOpen(false);
@@ -1037,6 +1170,32 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
     if (!isGroupChatEarly || !activeRoomId) return null;
     return chats.find((c) => c.id === activeRoomId && c.roomType === "group") ?? null;
   }, [chats, isGroupChatEarly, activeRoomId]);
+  const activeChatRow = useMemo(() => {
+    if (!activeRoomId) return null;
+    return chats.find((c) => c.id === activeRoomId) ?? null;
+  }, [chats, activeRoomId]);
+  const chatNotificationsEnabled = activeChatRow?.notificationsEnabled !== false;
+
+  const handleChatNotificationsChange = useCallback(
+    async (enabled: boolean) => {
+      if (!activeRoomId) return;
+      const prev = chatNotificationsEnabled;
+      setChatNotificationsEnabled(activeRoomId, enabled);
+      setNotificationsBusy(true);
+      try {
+        const tokens = await getValidAuthTokens();
+        if (!tokens?.access_token) throw new Error("Не авторизован");
+        await patchRoomMe(tokens.access_token, activeRoomId, { notifications_enabled: enabled });
+      } catch (e) {
+        setChatNotificationsEnabled(activeRoomId, prev);
+        setFileError(e instanceof Error ? e.message : "Не удалось сохранить настройки уведомлений");
+      } finally {
+        setNotificationsBusy(false);
+      }
+    },
+    [activeRoomId, chatNotificationsEnabled, setChatNotificationsEnabled],
+  );
+
   const isGroupCreator = !!(user?.id && activeGroupRow && String(activeGroupRow.groupCreatedBy) === String(user.id));
 
   const meetThreadOk =
@@ -1168,6 +1327,22 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
       return null;
     },
     [user?.id, user?.avatar, activeChatUser?.id, activeChatUser?.avatar, activeGroupRow],
+  );
+
+  const resolveUserInitials = useCallback(
+    (uid: string) => {
+      const u = uid.trim().toLowerCase();
+      const me = user?.id?.trim().toLowerCase();
+      if (me && u === me) return getInitials(user?.name?.trim() || "Вы");
+      if (activeChatUser?.id && activeChatUser.id.trim().toLowerCase() === u) {
+        return getInitials(activeChatUser.name);
+      }
+      const short = activeGroupRow?.memberShortNameByUserId?.[u];
+      if (short) return getInitials(short);
+      const shortId = uid.slice(0, 8);
+      return getInitials(shortId ? `Пользователь ${shortId}` : "Пользователь");
+    },
+    [user?.id, user?.name, activeChatUser?.id, activeChatUser?.name, activeGroupRow?.memberShortNameByUserId],
   );
 
   const submitMessageReaction = useCallback(
@@ -1919,7 +2094,7 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
   const threadUi = (
         <div
           ref={threadShellRef}
-          className="relative flex h-full min-h-0 flex-col overflow-hidden bg-background"
+          className="relative flex h-full min-h-0 flex-col overflow-hidden"
         >
           <header className="absolute left-0 right-0 top-0 z-30 h-14 w-full shrink-0 border-b border-white/10 bg-background/35 backdrop-blur-xl shadow-[0_10px_30px_-20px_rgba(0,0,0,0.6)] overflow-visible md:relative md:shrink-0">
             <div className="absolute inset-0 overflow-hidden">
@@ -2081,17 +2256,34 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
                     role="menu"
                     className="absolute right-0 mt-2 min-w-[12rem] overflow-hidden rounded-xl border border-white/15 bg-background/70 backdrop-blur-xl shadow-xl"
                   >
+                    {llmEnabled ? (
+                      <>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          onClick={() => {
+                            setHeaderMenuOpen(false);
+                            setChatPeriodAnalysisOpen(true);
+                          }}
+                          className="flex w-full items-center gap-2 px-3 py-2 text-sm text-foreground hover:bg-white/10 focus:outline-none focus:bg-white/10"
+                        >
+                          <Sparkles className="h-4 w-4 text-primary" />
+                          Анализ переписки
+                        </button>
+                        <div className="border-t border-white/10" role="separator" />
+                      </>
+                    ) : null}
                     <button
                       type="button"
                       role="menuitem"
                       onClick={() => {
                         setHeaderMenuOpen(false);
-                        setChatPeriodAnalysisOpen(true);
+                        setChatSettingsOpen(true);
                       }}
                       className="flex w-full items-center gap-2 px-3 py-2 text-sm text-foreground hover:bg-white/10 focus:outline-none focus:bg-white/10"
                     >
-                      <Sparkles className="h-4 w-4 text-primary" />
-                      Анализ переписки
+                      <Settings className="h-4 w-4 text-primary" />
+                      Настройки чата
                     </button>
                     <div className="border-t border-white/10" role="separator" />
                     {isGroupChat ? (
@@ -2184,6 +2376,21 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
             isRunning={isChatPeriodAnalysisRunning}
           />
 
+          <ChatSettingsSheet
+            open={chatSettingsOpen}
+            onClose={() => setChatSettingsOpen(false)}
+            notificationsEnabled={chatNotificationsEnabled}
+            onNotificationsChange={(enabled) => void handleChatNotificationsChange(enabled)}
+            notificationsBusy={notificationsBusy}
+            onOpenWallpaperPicker={() => setWallpaperPickerOpen(true)}
+          />
+
+          <ChatWallpaperPickerSheet
+            open={wallpaperPickerOpen}
+            onClose={() => setWallpaperPickerOpen(false)}
+            roomId={activeRoomId}
+          />
+
           {deleteModalOpen ? (
             <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
               <div
@@ -2273,6 +2480,8 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
               message={messageMenu.message}
               anchorRect={messageMenu.rect}
               onClose={() => setMessageMenu(null)}
+              resolveReactionAvatar={resolveReactionAvatar}
+              resolveUserInitials={resolveUserInitials}
               onReply={() =>
                 setReplyingTo({
                   id: messageMenu.message.id,
@@ -2290,7 +2499,7 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
                 const msg = messageMenu.message;
                 void submitMessageReaction(msg.id, emoji);
               }}
-              canAnalyze={messageAnalyzeReady}
+              canAnalyze={llmEnabled && messageAnalyzeReady}
               onAnalyze={() => void handleMessageAnalyze()}
               analyzeInProgress={isMessageAnalyzing}
             />
@@ -2358,7 +2567,7 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
           ) : null}
 
           <div className="relative flex-1 min-h-0 overflow-hidden">
-            
+            <ChatWallpaperLayer roomId={activeRoomId} />
 
             <div
               ref={scrollRef}
@@ -2373,11 +2582,7 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
               className={`no-scrollbar relative z-10 h-full overflow-y-auto overscroll-contain px-5 sm:px-7 ${
                 meetCallNotice && meetThreadOk ? "pt-3 md:pt-2" : "pt-14 md:pt-0"
               }`}
-              style={{
-                paddingBottom: emojiKeyboardOpen
-                  ? `calc(5rem + min(40dvh, 320px) + env(safe-area-inset-bottom, 0px) + ${keyboardInset}px)`
-                  : `calc(5rem + env(safe-area-inset-bottom, 0px) + ${keyboardInset}px)`,
-              }}
+              style={{ paddingBottom: scrollMessagesPaddingBottom }}
             >
               <div className="min-h-full flex flex-col justify-end space-y-4">
                 {isMessagesLoading && !hasMessages && (
@@ -2389,8 +2594,11 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
                   <div className="flex flex-col items-center justify-center py-8 px-4 text-center">
                     <p className="text-sm text-destructive mb-2">{messagesError}</p>
                     <p className="text-xs text-muted-foreground mb-4 max-w-sm">
-                      Ключи шифрования создаются при регистрации в приложении и хранятся на устройстве. Если вы вошли через
-                      существующий аккаунт на другом устройстве, сообщения не получится расшифровать.
+                      {/расшифров|decrypt|ключ/i.test(messagesError)
+                        ? "Ключи шифрования привязаны к устройству. На новом устройстве нужна привязка в профиле или восстановление из резервной копии."
+                        : /Signal|Web Crypto|устройств|encrypt|шифр/i.test(messagesError)
+                          ? "Проверьте, что вы вошли в аккаунт и устройство зарегистрировано (профиль → Устройства). Обновите страницу и попробуйте снова."
+                          : "Проверьте сеть и авторизацию. Если ошибка повторяется — откройте профиль и перезайдите в приложение."}
                     </p>
                     <Link href="/profile" className="text-sm text-primary hover:underline font-medium">
                       Перейти в профиль
@@ -2431,6 +2639,7 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
                                 hideVisual={messageMenu !== null && messageMenu.message.id === msg.id}
                                 onLongPress={(rect) => setMessageMenu({ message: msg, rect })}
                                 resolveReactionAvatar={resolveReactionAvatar}
+                                resolveUserInitials={resolveUserInitials}
                                 currentUserId={user.id}
                                 groupIncomingAvatar={isGroupChatEarly}
                                 onReactionChipClick={
@@ -2454,6 +2663,7 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
                             hideVisual={messageMenu !== null && messageMenu.message.id === msg.id}
                             onLongPress={(rect) => setMessageMenu({ message: msg, rect })}
                             resolveReactionAvatar={resolveReactionAvatar}
+                            resolveUserInitials={resolveUserInitials}
                             currentUserId={user.id}
                             groupIncomingAvatar={isGroupChatEarly}
                             onReactionChipClick={
@@ -2473,24 +2683,37 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
           </div>
 
           {showScrollToBottom ? (
-            <button
-              type="button"
-              onClick={() => bottomRef.current?.scrollIntoView({ behavior: "smooth" })}
-              className="fixed right-4 z-40 flex h-11 w-11 items-center justify-center rounded-full border border-primary/50 bg-background/50 text-primary shadow-lg backdrop-blur-xl hover:bg-background/60 focus:outline-none focus:ring-2 focus:ring-primary/40"
-              style={{
-                bottom: emojiKeyboardOpen
-                  ? `calc(6rem + min(40dvh, 320px) + env(safe-area-inset-bottom, 0px) + ${keyboardInset}px)`
-                  : `calc(6rem + env(safe-area-inset-bottom, 0px) + ${keyboardInset}px)`,
-              }}
-              aria-label="Вниз"
-              title="Вниз"
+            <div
+              className="fixed right-4 z-40 flex flex-col items-center gap-1.5"
+              style={{ bottom: jumpToBottomButtonBottom }}
             >
-              <ArrowDown size={18} />
-            </button>
+              {pendingBelowCount > 0 ? (
+                <span
+                  className="min-w-[1.25rem] rounded-full bg-primary px-2 py-0.5 text-center text-xs font-semibold tabular-nums text-primary-foreground shadow-md"
+                  aria-hidden
+                >
+                  {pendingBelowCount > 99 ? "99+" : pendingBelowCount}
+                </span>
+              ) : null}
+              <button
+                type="button"
+                onClick={scrollToBottomAndClear}
+                className="flex h-11 w-11 items-center justify-center rounded-full border border-primary/50 bg-background/50 text-primary shadow-lg backdrop-blur-xl hover:bg-background/60 focus:outline-none focus:ring-2 focus:ring-primary/40"
+                aria-label={
+                  pendingBelowCount > 0
+                    ? `Вниз, ${pendingBelowCount} новых сообщений`
+                    : "Вниз"
+                }
+                title={pendingBelowCount > 0 ? `${pendingBelowCount} новых` : "Вниз"}
+              >
+                <ArrowDown size={18} />
+              </button>
+            </div>
           ) : null}
 
           <div
-            className="fixed inset-x-0 z-30 border-t border-white/10 bg-background/60 backdrop-blur-xl pb-[env(safe-area-inset-bottom,0px)]"
+            ref={composerRef}
+            className="fixed inset-x-0 z-30 overflow-visible border-t border-white/10 bg-background/60 backdrop-blur-xl pb-[env(safe-area-inset-bottom,0px)]"
             style={{ bottom: keyboardInset }}
           >
             <div className="px-4 pb-3 pt-2">
@@ -2635,16 +2858,18 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
                     onChange={handleFileSelect}
                     aria-hidden
                   />
-                  <AttachFileModal
-                    isOpen={attachModalOpen}
-                    onClose={() => setAttachModalOpen(false)}
-                    onTakePhoto={() => cameraInputRef.current?.click()}
-                    onUploadFile={() => fileInputRef.current?.click()}
-                    onImageFile={ingestFileForSend}
-                    onChooseImageFromDevice={() => imagePickerInputRef.current?.click()}
-                    onShareLocation={() => setShareLocationOpen(true)}
-                    portalRootRef={mode === "embedded" ? threadShellRef : undefined}
-                  />
+                  {!isDesktopComposer ? (
+                    <AttachFileModal
+                      isOpen={attachModalOpen}
+                      onClose={() => setAttachModalOpen(false)}
+                      onTakePhoto={() => cameraInputRef.current?.click()}
+                      onUploadFile={() => fileInputRef.current?.click()}
+                      onImageFile={ingestFileForSend}
+                      onChooseImageFromDevice={() => imagePickerInputRef.current?.click()}
+                      onShareLocation={() => setShareLocationOpen(true)}
+                      portalRootRef={mode === "embedded" ? threadShellRef : undefined}
+                    />
+                  ) : null}
                   <ShareLocationModal
                     open={shareLocationOpen}
                     onClose={() => setShareLocationOpen(false)}
@@ -2660,26 +2885,82 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
                       setReplyingTo(null);
                     }}
                   />
-                  <div className="flex min-w-0 flex-1 items-center gap-0.5 rounded-3xl border border-border bg-background py-1 pl-1.5 pr-1.5 focus-within:ring-2 focus-within:ring-primary/30">
-                    <button
-                      type="button"
-                      onClick={() => setAttachModalOpen(true)}
-                      className="shrink-0 rounded-lg p-2 text-muted-foreground hover:bg-muted/50 hover:text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
-                      aria-label="Прикрепить файл"
-                    >
-                      <Paperclip size={22} />
-                    </button>
-                    <EmojiKeyboardTrigger
-                      open={emojiKeyboardOpen}
-                      onPress={() => {
-                        if (emojiKeyboardOpen) {
-                          setEmojiKeyboardOpen(false);
-                        } else {
-                          inputRef.current?.blur();
-                          setEmojiKeyboardOpen(true);
-                        }
-                      }}
-                    />
+                  <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-visible rounded-3xl border border-border bg-background py-1 pl-1.5 pr-1.5 focus-within:ring-2 focus-within:ring-primary/30">
+                    <div className="relative shrink-0">
+                      <button
+                        ref={attachBtnRef}
+                        type="button"
+                        onClick={() => {
+                          setAttachModalOpen((open) => {
+                            const next = !open;
+                            if (next) setEmojiKeyboardOpen(false);
+                            return next;
+                          });
+                        }}
+                        aria-expanded={attachModalOpen}
+                        className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full focus:outline-none focus:ring-2 focus:ring-primary/30 ${
+                          attachModalOpen
+                            ? "bg-primary/15 text-primary"
+                            : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+                        }`}
+                        aria-label="Прикрепить файл"
+                      >
+                        <Paperclip size={22} />
+                      </button>
+                      {isDesktopComposer ? (
+                        <ComposerUpwardPopover
+                          open={attachModalOpen}
+                          onClose={() => setAttachModalOpen(false)}
+                          anchorRef={attachBtnRef}
+                          ariaLabel="Прикрепить файл"
+                        >
+                          <AttachFileDesktopMenu
+                            onChooseImage={() => imagePickerInputRef.current?.click()}
+                            onUploadFile={() => fileInputRef.current?.click()}
+                            onTakePhoto={() => cameraInputRef.current?.click()}
+                            onShareLocation={() => setShareLocationOpen(true)}
+                            onClose={() => setAttachModalOpen(false)}
+                          />
+                        </ComposerUpwardPopover>
+                      ) : null}
+                    </div>
+                    <div className="relative shrink-0">
+                      <EmojiKeyboardTrigger
+                        ref={emojiBtnRef}
+                        open={emojiKeyboardOpen}
+                        onPress={() => {
+                          if (emojiKeyboardOpen) {
+                            setEmojiKeyboardOpen(false);
+                          } else {
+                            setAttachModalOpen(false);
+                            inputRef.current?.blur();
+                            setEmojiKeyboardOpen(true);
+                          }
+                        }}
+                      />
+                      {isDesktopComposer ? (
+                        <ComposerUpwardPopover
+                          open={emojiKeyboardOpen}
+                          onClose={() => setEmojiKeyboardOpen(false)}
+                          anchorRef={emojiBtnRef}
+                          ariaLabel="Выбор эмодзи"
+                          className="w-[min(calc(100vw-2rem),360px)]"
+                        >
+                          <EmojiKeyboardPanel
+                            open={emojiKeyboardOpen}
+                            onClose={() => setEmojiKeyboardOpen(false)}
+                            variant="popover"
+                            onSelect={(emoji) => {
+                              setInput((prev) => {
+                                const next = prev + emoji;
+                                if (next.trim()) queueMicrotask(() => bumpComposerTyping());
+                                return next;
+                              });
+                            }}
+                          />
+                        </ComposerUpwardPopover>
+                      ) : null}
+                    </div>
                     <input
                       ref={inputRef}
                       type="text"
@@ -2780,17 +3061,19 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
                 </form>
               </div>
             </div>
-            <EmojiKeyboardPanel
-              open={emojiKeyboardOpen}
-              onClose={() => setEmojiKeyboardOpen(false)}
-              onSelect={(emoji) => {
-                setInput((prev) => {
-                  const next = prev + emoji;
-                  if (next.trim()) queueMicrotask(() => bumpComposerTyping());
-                  return next;
-                });
-              }}
-            />
+            {!isDesktopComposer ? (
+              <EmojiKeyboardPanel
+                open={emojiKeyboardOpen}
+                onClose={() => setEmojiKeyboardOpen(false)}
+                onSelect={(emoji) => {
+                  setInput((prev) => {
+                    const next = prev + emoji;
+                    if (next.trim()) queueMicrotask(() => bumpComposerTyping());
+                    return next;
+                  });
+                }}
+              />
+            ) : null}
           </div>
         </div>
   );

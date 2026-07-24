@@ -39,6 +39,8 @@ export type MessageActionsOverlayProps = {
   canAnalyze?: boolean;
   onAnalyze?: () => void;
   analyzeInProgress?: boolean;
+  resolveReactionAvatar?: (userId: string) => string | null | undefined;
+  resolveUserInitials?: (userId: string) => string;
 };
 
 async function copyToClipboard(text: string): Promise<boolean> {
@@ -93,6 +95,8 @@ export function MessageActionsOverlay({
   canAnalyze = false,
   onAnalyze,
   analyzeInProgress = false,
+  resolveReactionAvatar,
+  resolveUserInitials,
 }: MessageActionsOverlayProps) {
   const [reactionsExpanded, setReactionsExpanded] = useState(false);
 
@@ -195,6 +199,8 @@ export function MessageActionsOverlay({
             message={message}
             interactive={false}
             anchorBox={{ width: anchorRect.width, height: anchorRect.height }}
+            resolveReactionAvatar={resolveReactionAvatar}
+            resolveUserInitials={resolveUserInitials}
           />
         </div>
       </div>

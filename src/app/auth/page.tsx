@@ -2,10 +2,14 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import Link from "next/link";
-import { MessageCircle, LogIn, UserPlus } from "lucide-react";
+import { LogIn, UserPlus } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
-import { OAuthSocialButtons } from "@/components/OAuthSocialButtons";
+import { AuthShell, AuthShellBody } from "@/components/auth/AuthShell";
+import { AuthHero } from "@/components/auth/AuthHero";
+import { AuthSection } from "@/components/auth/AuthSection";
+import { AuthCard } from "@/components/auth/AuthCard";
+import { AuthNavRow } from "@/components/auth/AuthNavRow";
+import { AuthOAuthSection } from "@/components/auth/AuthOAuthSection";
 
 export default function AuthPage() {
   const router = useRouter();
@@ -27,51 +31,20 @@ export default function AuthPage() {
     if (ready && isAuthenticated) router.replace("/");
   }, [ready, isAuthenticated, router]);
 
-  if (!ready) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
-        <div className="animate-spin rounded-full h-10 w-10 border-2 border-primary border-t-transparent" />
-      </div>
-    );
-  }
-
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center px-6 pt-6 pb-[calc(1.5rem+env(safe-area-inset-bottom,0px))] bg-background">
-      <div className="w-full max-w-sm space-y-8">
-        <div className="text-center">
-          <div className="inline-flex w-16 h-16 rounded-2xl bg-primary/15 text-primary items-center justify-center mb-4">
-            <MessageCircle size={32} />
-          </div>
-          <h1 className="text-2xl font-bold text-foreground">Kindred</h1>
-        </div>
+    <AuthShell loading={!ready}>
+      <AuthShellBody>
+        <AuthHero title="Kindred" subtitle="Безопасный мессенджер для семьи и близких" />
 
-        <OAuthSocialButtons />
-        <div className="relative py-2">
-          <div className="absolute inset-0 flex items-center" aria-hidden>
-            <span className="w-full border-t border-border" />
-          </div>
-          <div className="relative flex justify-center text-xs uppercase">
-            <span className="bg-background px-2 text-muted-foreground">или</span>
-          </div>
-        </div>
+        <AuthOAuthSection />
 
-        <div className="space-y-3">
-          <Link
-            href="/auth/login/"
-            className="w-full flex items-center justify-center gap-2 rounded-xl border-2 border-primary bg-primary text-primary-foreground py-3 px-4 font-medium hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2"
-          >
-            <LogIn size={20} />
-            Войти
-          </Link>
-          <Link
-            href="/auth/register/"
-            className="w-full flex items-center justify-center gap-2 rounded-xl border border-border bg-card py-3 px-4 font-medium text-foreground hover:bg-muted focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2"
-          >
-            <UserPlus size={20} />
-            Зарегистрироваться
-          </Link>
-        </div>
-      </div>
-    </div>
+        <AuthSection title="Аккаунт">
+          <AuthCard>
+            <AuthNavRow href="/auth/login/" icon={LogIn} label="Войти" subtitle="Логин, пароль или QR" primary />
+            <AuthNavRow href="/auth/register/" icon={UserPlus} label="Зарегистрироваться" subtitle="Создать новый аккаунт" />
+          </AuthCard>
+        </AuthSection>
+      </AuthShellBody>
+    </AuthShell>
   );
 }

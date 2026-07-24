@@ -32,6 +32,7 @@ export interface RoomLastMessage {
   nonce: string;
   sent_at: string;
   is_read: boolean;
+  device_envelopes?: { device_id: string; encrypted_aes_key: string }[] | null;
 }
 
 export interface Room {
@@ -46,6 +47,22 @@ export interface Room {
   users: RoomUser[];
   last_message?: RoomLastMessage | null;
   unread_count?: number;
+  /** Настройки текущего пользователя в комнате */
+  notifications_enabled?: boolean;
+}
+
+async function authHeaders(accessToken: string): Promise<Record<string, string>> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${accessToken}`,
+  };
+  try {
+    const { getOrCreateLocalDeviceId } = await import("@/lib/deviceIdentity");
+    const deviceId = await getOrCreateLocalDeviceId();
+    if (deviceId) headers["X-Device-Id"] = deviceId;
+  } catch {
+    /* ignore */
+  }
+  return headers;
 }
 
 export interface CreateRoomResponse {
@@ -62,9 +79,7 @@ export async function getRooms(accessToken: string): Promise<Room[]> {
 
   const res = await fetch(url, {
     method: "GET",
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
+    headers: await authHeaders(accessToken),
   });
 
   if (!res.ok) {
@@ -100,6 +115,10 @@ export async function getRooms(accessToken: string): Promise<Room[]> {
       : [],
     last_message: r.last_message ?? null,
     unread_count: typeof (r as unknown as { unread_count?: unknown }).unread_count === "number" ? (r as unknown as { unread_count: number }).unread_count : 0,
+    notifications_enabled:
+      typeof (r as unknown as { notifications_enabled?: unknown }).notifications_enabled === "boolean"
+        ? (r as unknown as { notifications_enabled: boolean }).notifications_enabled
+        : true,
   }));
 }
 
@@ -197,6 +216,7 @@ export async function createGroupRoom(accessToken: string, params: CreateGroupRo
       : [],
     last_message: r.last_message ?? null,
     unread_count: typeof r.unread_count === "number" ? r.unread_count : 0,
+    notifications_enabled: r.notifications_enabled !== false,
   };
 }
 
@@ -257,7 +277,39 @@ function normalizeRoom(r: Room): Room {
       : [],
     last_message: r.last_message ?? null,
     unread_count: typeof r.unread_count === "number" ? r.unread_count : 0,
+    notifications_enabled: r.notifications_enabled !== false,
   };
+}
+
+export interface PatchRoomMeBody {
+  notifications_enabled?: boolean;
+}
+
+/** Настройки текущего пользователя в комнате (PATCH /api/v1/rooms/{room_id}/me). */
+export async function patchRoomMe(
+  accessToken: string,
+  roomId: string,
+  body: PatchRoomMeBody,
+): Promise<Room> {
+  const id = roomId.trim();
+  const url = `${BASE_URL.replace(/\/$/, "")}/api/v1/rooms/${encodeURIComponent(id)}/me`;
+  const res = await fetch(url, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    const detail =
+      typeof (data as { detail?: string }).detail === "string"
+        ? (data as { detail: string }).detail
+        : res.statusText;
+    throw new Error(detail || `HTTP ${res.status}`);
+  }
+  return normalizeRoom(await res.json());
 }
 
 /** Покинуть комнату (только себя). POST /api/v1/rooms/{room_id}/leave */

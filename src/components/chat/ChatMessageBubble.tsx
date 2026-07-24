@@ -5,10 +5,12 @@ import { Check, Loader2, Phone } from "lucide-react";
 import type { ChatMessage, ReplyTo } from "@/stores/chatStore";
 import { formatMeetCallLogLabel, formatMessageClock, getMessagePreviewText } from "@/utils/chatUtils";
 import { MessageBody } from "./ChatMessageBody";
+import { isAudioAttachment, isVideoAttachment } from "@/lib/mediaMime";
 import {
   getMessageBubbleClassName,
   type MessageBubbleLayout,
 } from "./chatMessageBubbleClassName";
+import { getInitials } from "@/lib/getInitials";
 
 const SWIPE_THRESHOLD = 50;
 const MAX_DRAG_PX = 72;
@@ -63,6 +65,8 @@ export type ChatMessageBubbleProps = {
   anchorBox?: { width: number; height: number };
   /** Аватар участника для строки реакций (data URL или https). */
   resolveReactionAvatar?: (userId: string) => string | null | undefined;
+  /** Инициалы, если аватара нет (имя из группы / профиля, не userId). */
+  resolveUserInitials?: (userId: string) => string;
   /** Тап по чипу реакции: эмодзи на чипе и userId автора реакции (комната, серверный id сообщения). */
   onReactionChipClick?: (emoji: string, chipUserId: string) => void;
   /** Для подписи чипа (своя / чужая реакция). */
@@ -102,14 +106,17 @@ export function ChatMessageBubble({
   onLongPress,
   anchorBox,
   resolveReactionAvatar,
+  resolveUserInitials,
   onReactionChipClick,
   currentUserId,
   groupIncomingAvatar = false,
 }: ChatMessageBubbleProps) {
   const isAudioMessage =
-    message.content.type === "file" && message.content.file.mimeType.startsWith("audio/");
+    message.content.type === "file" &&
+    isAudioAttachment(message.content.file.mimeType, message.content.file.name);
   const isVideoMessage =
-    message.content.type === "file" && message.content.file.mimeType.startsWith("video/");
+    message.content.type === "file" &&
+    isVideoAttachment(message.content.file.mimeType, message.content.file.name);
   const isImageMessage =
     message.content.type === "file" && message.content.file.mimeType.toLowerCase().startsWith("image/");
   /** Круг с % — только для «тяжёлых» файлов; не для фото, аудио и видео (у видео свой прогресс в плеере). */
@@ -400,6 +407,7 @@ export function ChatMessageBubble({
   const me = currentUserId?.trim().toLowerCase() ?? "";
   const showGroupSenderAvatar = Boolean(groupIncomingAvatar && !message.isOwn);
   const senderAvatarUrl = showGroupSenderAvatar ? (resolveReactionAvatar?.(message.senderId) ?? null) : null;
+  const initialsFor = (userId: string) => resolveUserInitials?.(userId) ?? getInitials("?");
 
   const bubbleDiv = (
     <div
@@ -540,7 +548,7 @@ export function ChatMessageBubble({
                           : "bg-background/80 text-muted-foreground ring-border/60 dark:bg-background/40 dark:ring-white/10"
                       }`}
                     >
-                      {(r.userId.slice(0, 1) || "?").toUpperCase()}
+                      {initialsFor(r.userId)}
                     </span>
                   )}
                   <span className="text-[13px] leading-none tabular-nums">{r.emoji}</span>
@@ -600,7 +608,7 @@ export function ChatMessageBubble({
               />
             ) : (
               <span className="flex h-8 w-8 items-center justify-center rounded-full bg-muted text-[11px] font-semibold text-muted-foreground ring-1 ring-border/50 shadow-sm dark:ring-white/15">
-                {(message.senderId.slice(0, 1) || "?").toUpperCase()}
+                {initialsFor(message.senderId)}
               </span>
             )}
           </div>

@@ -12,16 +12,20 @@ import {
   getChatKeysForUser,
   setChatKeysForUser,
   type StoredUser,
+  type StoredChatKeys,
 } from "@/lib/secureStorage";
 import {
   chatAuthApi,
   ChatAuthApiError,
+  type LoginResponse,
   type MeResponse,
   type OAuthExchangeResponse,
 } from "@/services/chatAuthApi";
-import { getMyKeypair } from "@/services/chatKeysApi";
 import { useChatStore } from "@/stores/chatStore";
 import { syncPushWithBackend } from "@/lib/pushNotifications";
+import { ensureDeviceRegistered } from "@/services/chatDevicesApi";
+import { getOrCreateLocalDeviceIdentity } from "@/lib/deviceIdentity";
+import { useLlmAccessStore } from "@/stores/llmAccessStore";
 
 /** Свести ответ /auth/me к StoredUser (ФИО, username, аватар data URL). */
 function storedUserFromMe(me: MeResponse, base: StoredUser): StoredUser {
@@ -45,6 +49,52 @@ async function fetchStoredUserProfile(accessToken: string, base: StoredUser): Pr
   }
 }
 
+/**
+ * Private key только из локального хранилища (или после restore backup).
+ * Сервер private не выдаёт.
+ */
+async function resolveChatKeys(userId: string): Promise<StoredChatKeys | null> {
+  const local = await getChatKeysForUser(userId);
+  if (local?.private_key) return local;
+  return null;
+}
+
+async function applyDeviceLinkLoginResult(
+  res: { access_token: string; refresh_token: string; user_id: string; username: string },
+  set: (partial: Partial<AuthState> | ((s: AuthState) => Partial<AuthState>)) => void,
+): Promise<void> {
+  const identity = await getOrCreateLocalDeviceIdentity();
+  const user: StoredUser = {
+    id: String(res.user_id),
+    name: res.username,
+  };
+  const enriched = await fetchStoredUserProfile(res.access_token, user);
+  await setChatKeysForUser(String(res.user_id), {
+    public_key: identity.publicKeyPem,
+    private_key: identity.privateKeyPem,
+  });
+  await setAuthWithTokens(
+    enriched,
+    {
+      access_token: res.access_token,
+      refresh_token: res.refresh_token,
+    },
+    {
+      public_key: identity.publicKeyPem,
+      private_key: identity.privateKeyPem,
+    },
+  );
+  void useLlmAccessStore.getState().refresh();
+  set({
+    user: enriched,
+    isAuthenticated: true,
+    isLoading: false,
+    error: null,
+    needsKeyRestore: false,
+  });
+  void syncPushWithBackend().catch(() => {});
+}
+
 export interface RegisterData {
   username: string;
   password: string;
@@ -59,13 +109,20 @@ interface AuthState {
   isAuthenticated: boolean;
   isLoading: boolean;
   error: string | null;
+  /** Нет локального private key (нужен backup passphrase или миграция). */
+  needsKeyRestore: boolean;
   initialize: () => Promise<void>;
   login: (username: string, password?: string) => Promise<void>;
+  /** Вход по QR/коду с доверенного устройства (мобильный сканирует kindred-link). */
+  loginWithDeviceLink: (code: string) => Promise<void>;
+  /** Завершение входа после approve с телефона (desktop poll). */
+  completeDeviceLinkLogin: (res: LoginResponse) => Promise<void>;
   /** Завершение входа после OAuth (код уже обменян на бэкенде). */
-  completeOAuthLogin: (payload: OAuthExchangeResponse) => Promise<void>;
+  completeOAuthLogin: (payload: OAuthExchangeResponse, clientKeys?: StoredChatKeys | null) => Promise<void>;
   register: (data: RegisterData) => Promise<void>;
   logout: () => Promise<void>;
   clearError: () => void;
+  clearNeedsKeyRestore: () => void;
   /** Обновить данные текущего пользователя (avatar, name) и сохранить в storage — сразу отображается везде. */
   updateUser: (patch: Partial<Pick<StoredUser, "name" | "avatar">>) => Promise<void>;
 }
@@ -75,13 +132,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   isAuthenticated: false,
   isLoading: false,
   error: null,
+  needsKeyRestore: false,
 
   initialize: async () => {
     set({ isLoading: true, error: null });
     try {
       const [user, tokens] = await Promise.all([getAuth(), getValidAuthTokens()]);
       if (user && tokens?.access_token) {
-        // Восстановить ключи чата: из локального хранилища по user_id или с сервера (вход с любого устройства)
         let sessionKeys = await getChatKeys();
         if (!sessionKeys?.private_key && user?.id) {
           const userKeys = await getChatKeysForUser(user.id);
@@ -91,17 +148,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           }
         }
         if (!sessionKeys?.private_key && tokens?.access_token) {
-          try {
-            const keypair = await getMyKeypair(tokens.access_token);
-            const keys = {
-              public_key: keypair.public_key,
-              private_key: keypair.private_key,
-            };
-            await setChatKeys(keys);
-            await setChatKeysForUser(user.id, keys);
-          } catch {
-            // Нет ключей на сервере (пользователь без ключевой пары) — не блокируем вход
-          }
+          sessionKeys = await resolveChatKeys(user.id);
+          if (sessionKeys) await setChatKeys(sessionKeys);
         }
         const enriched = await fetchStoredUserProfile(tokens.access_token, user);
         try {
@@ -114,13 +162,50 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           isAuthenticated: true,
           isLoading: false,
           error: null,
+          needsKeyRestore: !sessionKeys?.private_key,
         });
+        void ensureDeviceRegistered(tokens.access_token)
+          .catch(() => {})
+          .finally(() => {
+            void useLlmAccessStore.getState().refresh();
+          });
         void syncPushWithBackend().catch(() => {});
         return;
       }
-      set({ user: null, isAuthenticated: false, isLoading: false });
+      set({ user: null, isAuthenticated: false, isLoading: false, needsKeyRestore: false });
     } finally {
       set((s) => ({ ...s, isLoading: false }));
+    }
+  },
+
+
+  loginWithDeviceLink: async (code: string) => {
+    set({ isLoading: true, error: null });
+    try {
+      const { buildDeviceRegisterBody } = await import("@/lib/buildDeviceRegisterBody");
+      const deviceBody = await buildDeviceRegisterBody();
+      const res = await chatAuthApi.deviceLinkExchange({ code, ...deviceBody });
+      await applyDeviceLinkLoginResult(res, set);
+    } catch (e) {
+      const message =
+        e instanceof ChatAuthApiError
+          ? e.detail || e.message
+          : e instanceof Error
+            ? e.message
+            : "Ошибка входа по QR";
+      set({ error: message, isLoading: false, isAuthenticated: false });
+      throw e;
+    }
+  },
+
+  completeDeviceLinkLogin: async (res: LoginResponse) => {
+    set({ isLoading: true, error: null });
+    try {
+      await applyDeviceLinkLoginResult(res, set);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "Ошибка входа";
+      set({ error: message, isLoading: false, isAuthenticated: false });
+      throw e;
     }
   },
 
@@ -133,32 +218,30 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         name: res.username,
       };
       const enriched = await fetchStoredUserProfile(res.access_token, user);
-      let keys = await getChatKeysForUser(String(res.user_id));
-      if (!keys?.private_key) {
-        try {
-          const keypair = await getMyKeypair(res.access_token);
-          keys = {
-            public_key: keypair.public_key,
-            private_key: keypair.private_key,
-          };
-          await setChatKeysForUser(String(res.user_id), keys);
-        } catch {
-          // Ключей на сервере нет (старый пользователь без ключей) — вход без чата
-        }
+      try {
+        await ensureDeviceRegistered(res.access_token);
+      } catch {
+        // device register best-effort
       }
+      void useLlmAccessStore.getState().refresh();
+      const keys = await resolveChatKeys(String(res.user_id));
+      // After device ensure, keys often live in crypto secure storage → sync to session
+      const { getChatKeys } = await import("@/lib/secureStorage");
+      const sessionKeys = (await getChatKeys()) ?? keys;
       await setAuthWithTokens(
         enriched,
         {
           access_token: res.access_token,
           refresh_token: res.refresh_token,
         },
-        keys ?? undefined
+        sessionKeys ?? undefined
       );
       set({
         user: enriched,
         isAuthenticated: true,
         isLoading: false,
         error: null,
+        needsKeyRestore: !sessionKeys?.private_key,
       });
       void syncPushWithBackend().catch(() => {});
     } catch (e) {
@@ -177,7 +260,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     }
   },
 
-  completeOAuthLogin: async (payload: OAuthExchangeResponse) => {
+  completeOAuthLogin: async (payload: OAuthExchangeResponse, clientKeys?: StoredChatKeys | null) => {
     set({ isLoading: true, error: null });
     try {
       const user: StoredUser = {
@@ -185,27 +268,18 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         name: payload.username,
       };
       const enriched = await fetchStoredUserProfile(payload.access_token, user);
-      if (payload.is_new_user && payload.public_key && payload.private_key) {
-        await setChatKeysForUser(String(payload.user_id), {
-          public_key: payload.public_key,
-          private_key: payload.private_key,
-        });
+      if (clientKeys?.private_key && clientKeys.public_key) {
+        await setChatKeysForUser(String(payload.user_id), clientKeys);
       } else {
-        let keys = await getChatKeysForUser(String(payload.user_id));
-        if (!keys?.private_key) {
-          try {
-            const keypair = await getMyKeypair(payload.access_token);
-            keys = {
-              public_key: keypair.public_key,
-              private_key: keypair.private_key,
-            };
-            await setChatKeysForUser(String(payload.user_id), keys);
-          } catch {
-            /* как при обычном логине — без ключей на сервере */
-          }
-        }
+        await resolveChatKeys(String(payload.user_id));
       }
-      const keysForSession = await getChatKeysForUser(String(payload.user_id));
+      try {
+        await ensureDeviceRegistered(payload.access_token);
+      } catch {
+        /* ignore */
+      }
+      const keysForSession =
+        (await getChatKeysForUser(String(payload.user_id))) ?? (await getChatKeys());
       await setAuthWithTokens(
         enriched,
         {
@@ -219,8 +293,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         isAuthenticated: true,
         isLoading: false,
         error: null,
+        needsKeyRestore: !keysForSession?.private_key,
       });
       void syncPushWithBackend().catch(() => {});
+      void useLlmAccessStore.getState().refresh();
     } catch (e) {
       const message =
         e instanceof ChatAuthApiError
@@ -240,18 +316,27 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   register: async (data: RegisterData) => {
     set({ isLoading: true, error: null });
     try {
-      const res = await chatAuthApi.register(data);
-      if (res.public_key && res.private_key) {
-        await setChatKeysForUser(String(res.user_id), {
-          public_key: res.public_key,
-          private_key: res.private_key,
-        });
+      const identity = await getOrCreateLocalDeviceIdentity();
+      const res = await chatAuthApi.register({
+        ...data,
+        public_key: identity.publicKeyPem,
+      });
+      await setChatKeysForUser(String(res.user_id), {
+        public_key: identity.publicKeyPem,
+        private_key: identity.privateKeyPem,
+      });
+      // Auto-login tokens from register → register device
+      try {
+        await ensureDeviceRegistered(res.access_token);
+      } catch {
+        /* ignore */
       }
       set({
         isLoading: false,
         error: null,
         isAuthenticated: false,
         user: null,
+        needsKeyRestore: false,
       });
     } catch (e) {
       const message =
@@ -272,18 +357,18 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   logout: async () => {
     await clearAuthData();
     useChatStore.getState().resetSession();
-    set({ user: null, isAuthenticated: false, error: null });
+    useLlmAccessStore.getState().clear();
+    set({ user: null, isAuthenticated: false, error: null, needsKeyRestore: false });
   },
 
   clearError: () => set({ error: null }),
+  clearNeedsKeyRestore: () => set({ needsKeyRestore: false }),
 
   updateUser: async (patch) => {
     const current = get().user;
     if (!current) return;
     const updated: StoredUser = { ...current, ...patch };
-    // Сначала обновляем Zustand, чтобы UI обновился сразу.
     set({ user: updated });
-    // Затем пытаемся сохранить в storage. Если quota/ошибка — не ломаем UI.
     try {
       await setAuth(updated);
     } catch (e) {

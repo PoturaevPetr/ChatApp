@@ -19,6 +19,7 @@ import { OutgoingReceiptTicks } from "@/components/chat/ChatMessageBubble";
 import Image from "next/image";
 import { AI_ASSISTANT_NAME, AI_ASSISTANT_HREF } from "@/lib/aiAssistantConstants";
 import { useAiAssistantListPreview } from "@/components/ai/AiAssistantThread";
+import { useLlmAccessStore } from "@/stores/llmAccessStore";
 
 function getInitials(name: string): string {
   const parts = name.trim().split(" ");
@@ -101,6 +102,7 @@ export type ChatListProps = {
 
 export function ChatList({ allowNativePullToRefresh = true }: ChatListProps) {
   const { user } = useAuthStore();
+  const llmEnabled = useLlmAccessStore((s) => s.enabled);
   const { chats, loadUsers, loadChats, isLoading, error } = useChatStore();
   const ensureConnected = useWebSocketStore((s) => s.ensureConnected);
   const [search, setSearch] = useState("");
@@ -187,7 +189,7 @@ export function ChatList({ allowNativePullToRefresh = true }: ChatListProps) {
         {listLoading ? (
           <div className="flex flex-col">
             <ul className="divide-y divide-border">
-              <AiAssistantPinnedRow />
+              {llmEnabled ? <AiAssistantPinnedRow /> : null}
             </ul>
             <div className="flex flex-col items-center justify-center py-12">
               <div className="mb-3 h-10 w-10 animate-spin rounded-full border-2 border-primary border-t-transparent" />
@@ -197,7 +199,7 @@ export function ChatList({ allowNativePullToRefresh = true }: ChatListProps) {
         ) : (
           <>
             <ul className="divide-y divide-border">
-              <AiAssistantPinnedRow />
+              {llmEnabled ? <AiAssistantPinnedRow /> : null}
               {sorted.map((chat) => (
                 <li key={chat.id}>
                   <Link

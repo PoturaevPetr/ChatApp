@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { Loader2 } from "lucide-react";
+import { useCallback, useState } from "react";
+import { ChevronRight, Loader2 } from "lucide-react";
 import { chatAuthApi, type OAuthProviderId, type OAuthProvidersResponse } from "@/services/chatAuthApi";
+import { useOAuthProviders } from "@/hooks/useOAuthProviders";
 
 const OAUTH_STATE_KEY = "oauth_state";
 const OAUTH_PROVIDER_KEY = "oauth_provider";
@@ -64,25 +65,49 @@ function randomState(): string {
   return (a + b).slice(0, 48);
 }
 
-export function OAuthSocialButtons({ className = "" }: { className?: string }) {
-  const [providers, setProviders] = useState<OAuthProvidersResponse | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [starting, setStarting] = useState<OAuthProviderId | null>(null);
+type OAuthSocialButtonsProps = {
+  className?: string;
+  variant?: "default" | "rows";
+  providers?: OAuthProvidersResponse;
+};
 
-  useEffect(() => {
-    let cancelled = false;
-    void chatAuthApi
-      .oauthProviders()
-      .then((p) => {
-        if (!cancelled) setProviders(p);
-      })
-      .catch(() => {
-        if (!cancelled) setLoadError("Не удалось загрузить способ входа");
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+function OAuthRowButton({
+  label,
+  icon,
+  loading,
+  disabled,
+  onClick,
+  iconClassName = "bg-primary/10",
+}: {
+  label: string;
+  icon: React.ReactNode;
+  loading?: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+  iconClassName?: string;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled || loading}
+      onClick={onClick}
+      className="flex w-full items-center gap-3 px-4 py-3.5 text-left text-foreground transition-colors hover:bg-muted/40 disabled:opacity-50"
+    >
+      <span
+        className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${iconClassName}`}
+      >
+        {loading ? <Loader2 size={18} className="animate-spin text-muted-foreground" aria-hidden /> : icon}
+      </span>
+      <span className="min-w-0 flex-1 text-sm font-medium leading-snug">{label}</span>
+      <ChevronRight size={18} className="shrink-0 text-muted-foreground/70" aria-hidden />
+    </button>
+  );
+}
+
+export function OAuthSocialButtons({ className = "", variant = "default", providers: providersProp }: OAuthSocialButtonsProps) {
+  const { providers: providersFromContext } = useOAuthProviders();
+  const providers = providersProp ?? providersFromContext;
+  const [starting, setStarting] = useState<OAuthProviderId | null>(null);
 
   const start = useCallback(async (provider: OAuthProviderId) => {
     const { Capacitor } = await import("@capacitor/core");
@@ -110,7 +135,6 @@ export function OAuthSocialButtons({ className = "" }: { className?: string }) {
         window.location.href = authorization_url;
       }
     } catch {
-      setLoadError("Не удалось начать вход");
       if (isNative) {
         const { Preferences } = await import("@capacitor/preferences");
         await Preferences.remove({ key: "oauth_state" }).catch(() => {});
@@ -122,20 +146,48 @@ export function OAuthSocialButtons({ className = "" }: { className?: string }) {
     setStarting(null);
   }, []);
 
-  if (loadError && !providers) {
-    return <p className={`text-center text-xs text-muted-foreground ${className}`}>{loadError}</p>;
+  const resolvedProviders = providers;
+  if (!resolvedProviders) {
+    return null;
   }
 
-  if (!providers) {
+  const any = resolvedProviders.google || resolvedProviders.yandex || resolvedProviders.vk;
+  if (!any) return null;
+
+  if (variant === "rows") {
     return (
-      <div className={`flex justify-center py-2 ${className}`}>
-        <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" aria-hidden />
+      <div className={className}>
+        {resolvedProviders.google ? (
+          <OAuthRowButton
+            label="Google"
+            icon={<IconGoogle />}
+            loading={starting === "google"}
+            disabled={starting !== null}
+            onClick={() => void start("google")}
+          />
+        ) : null}
+        {resolvedProviders.yandex ? (
+          <OAuthRowButton
+            label="Яндекс"
+            icon={<IconYandex />}
+            loading={starting === "yandex"}
+            disabled={starting !== null}
+            onClick={() => void start("yandex")}
+          />
+        ) : null}
+        {resolvedProviders.vk ? (
+          <OAuthRowButton
+            label="ВКонтакте"
+            icon={<IconVK className="text-[#0077FF]" />}
+            loading={starting === "vk"}
+            disabled={starting !== null}
+            onClick={() => void start("vk")}
+            iconClassName="bg-[#0077FF]/10"
+          />
+        ) : null}
       </div>
     );
   }
-
-  const any = providers.google || providers.yandex || providers.vk;
-  if (!any) return null;
 
   const iconWrap = "flex h-9 w-9 shrink-0 items-center justify-center";
 
@@ -143,7 +195,7 @@ export function OAuthSocialButtons({ className = "" }: { className?: string }) {
     <div className={`space-y-3 ${className}`}>
       <p className="text-center text-xs font-medium uppercase tracking-wide text-muted-foreground">Войти через</p>
 
-      {providers.google ? (
+      {resolvedProviders.google ? (
         <button
           type="button"
           disabled={starting !== null}
@@ -161,7 +213,7 @@ export function OAuthSocialButtons({ className = "" }: { className?: string }) {
         </button>
       ) : null}
 
-      {providers.yandex ? (
+      {resolvedProviders.yandex ? (
         <button
           type="button"
           disabled={starting !== null}
@@ -179,7 +231,7 @@ export function OAuthSocialButtons({ className = "" }: { className?: string }) {
         </button>
       ) : null}
 
-      {providers.vk ? (
+      {resolvedProviders.vk ? (
         <button
           type="button"
           disabled={starting !== null}
@@ -197,7 +249,6 @@ export function OAuthSocialButtons({ className = "" }: { className?: string }) {
         </button>
       ) : null}
 
-      {loadError ? <p className="text-center text-xs text-destructive">{loadError}</p> : null}
     </div>
   );
 }

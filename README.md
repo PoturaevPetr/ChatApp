@@ -64,6 +64,23 @@ npm run cap:open:ios
 
 Перед `cap sync` всегда выполняется `npm run build`; Capacitor подхватывает содержимое папки `out/` как веб-приложение.
 
+## Hosted UI + MobileShell (рекомендуемый путь релизов)
+
+Частые обновления экранов — деплой static/Docker ChatApp. APK — из [`../MobileShell`](../MobileShell) только при нативных изменениях.
+
+```bash
+# 1) Hosted UI
+npm run build:hosted   # out/ + app-version.json
+npm run docker:build && npm run docker:up
+
+# 2) Оболочка
+cd ../MobileShell
+cp .env.example .env   # KINDRED_HOSTED_UI_URL=http://localhost:3080 или prod URL
+npm install && npm run sync
+```
+
+Контракт: [`../docs/NATIVE_BRIDGE.md`](../docs/NATIVE_BRIDGE.md).
+
 ## Docker (веб) и мобильное приложение из одного репозитория
 
 Оба варианта собирают статический каталог `out/`, но **разные env-файлы** и команда сборки:

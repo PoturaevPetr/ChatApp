@@ -1,13 +1,25 @@
 /**
- * Secure storage for auth data and encryption keys.
- * Uses localStorage (works in browser and Next.js dev/build).
- * For native Capacitor builds you can switch to @capacitor/preferences.
+ * Auth session storage + chat key material.
+ * User/tokens: localStorage (session convenience).
+ * Chat private/public keys: cryptoSecureStorage (IndexedDB / Keychain) — never localStorage long-term.
  */
+
+import {
+  cryptoSecureDelete,
+  cryptoSecureGet,
+  cryptoSecureSet,
+} from "@/lib/cryptoSecureStorage";
 
 const AUTH_USER_KEY = "chatapp_user";
 const AUTH_TOKENS_KEY = "chatapp_tokens";
-const AUTH_KEYS_KEY = "chatapp_keys";
-const AUTH_KEYS_PREFIX = "chatapp_keys_";
+/** Legacy localStorage keys — migrated on read, then removed. */
+const LEGACY_AUTH_KEYS_KEY = "chatapp_keys";
+const LEGACY_AUTH_KEYS_PREFIX = "chatapp_keys_";
+
+const SECURE_SESSION_KEYS = "auth:session_chat_keys";
+function secureUserKeysKey(userId: string): string {
+  return `auth:chat_keys:${userId.trim().toLowerCase()}`;
+}
 
 export interface StoredUser {
   id: string;
@@ -46,6 +58,17 @@ function getStorage(): {
   };
 }
 
+function parseKeys(raw: string | null): StoredChatKeys | null {
+  if (!raw) return null;
+  try {
+    const k = JSON.parse(raw) as StoredChatKeys;
+    if (typeof k?.public_key === "string" && typeof k?.private_key === "string") return k;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export async function setAuth(user: StoredUser | null): Promise<void> {
   const s = await getStorage();
   if (user) await s.set(AUTH_USER_KEY, JSON.stringify(user));
@@ -82,38 +105,49 @@ export async function getAuthTokens(): Promise<StoredAuthTokens | null> {
 
 /** Store encryption keys for a specific user (e.g. after registration). */
 export async function setChatKeysForUser(userId: string, keys: StoredChatKeys): Promise<void> {
+  await cryptoSecureSet(secureUserKeysKey(userId), JSON.stringify(keys));
   const s = await getStorage();
-  await s.set(AUTH_KEYS_PREFIX + userId, JSON.stringify(keys));
+  await s.remove(LEGACY_AUTH_KEYS_PREFIX + userId);
 }
 
-/** Load encryption keys for a user (e.g. after login). */
+/** Load encryption keys for a user (e.g. after login). Migrates legacy localStorage. */
 export async function getChatKeysForUser(userId: string): Promise<StoredChatKeys | null> {
+  const fromSecure = parseKeys(await cryptoSecureGet(secureUserKeysKey(userId)));
+  if (fromSecure) return fromSecure;
+
   const s = await getStorage();
-  const raw = await s.get(AUTH_KEYS_PREFIX + userId);
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as StoredChatKeys;
-  } catch {
-    return null;
+  const legacy = parseKeys(await s.get(LEGACY_AUTH_KEYS_PREFIX + userId));
+  if (legacy) {
+    await cryptoSecureSet(secureUserKeysKey(userId), JSON.stringify(legacy));
+    await s.remove(LEGACY_AUTH_KEYS_PREFIX + userId);
+    return legacy;
   }
+  return null;
 }
 
 /** Store current session keys (set at login from getChatKeysForUser). */
 export async function setChatKeys(keys: StoredChatKeys | null): Promise<void> {
   const s = await getStorage();
-  if (keys) await s.set(AUTH_KEYS_KEY, JSON.stringify(keys));
-  else await s.remove(AUTH_KEYS_KEY);
+  if (keys) {
+    await cryptoSecureSet(SECURE_SESSION_KEYS, JSON.stringify(keys));
+  } else {
+    await cryptoSecureDelete(SECURE_SESSION_KEYS);
+  }
+  await s.remove(LEGACY_AUTH_KEYS_KEY);
 }
 
 export async function getChatKeys(): Promise<StoredChatKeys | null> {
+  const fromSecure = parseKeys(await cryptoSecureGet(SECURE_SESSION_KEYS));
+  if (fromSecure) return fromSecure;
+
   const s = await getStorage();
-  const raw = await s.get(AUTH_KEYS_KEY);
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as StoredChatKeys;
-  } catch {
-    return null;
+  const legacy = parseKeys(await s.get(LEGACY_AUTH_KEYS_KEY));
+  if (legacy) {
+    await cryptoSecureSet(SECURE_SESSION_KEYS, JSON.stringify(legacy));
+    await s.remove(LEGACY_AUTH_KEYS_KEY);
+    return legacy;
   }
+  return null;
 }
 
 export async function setAuthWithTokens(
@@ -129,7 +163,20 @@ export async function setAuthWithTokens(
 
 export async function clearAuthData(): Promise<void> {
   const s = await getStorage();
+  const userRaw = await s.get(AUTH_USER_KEY);
   await s.remove(AUTH_USER_KEY);
   await s.remove(AUTH_TOKENS_KEY);
-  await s.remove(AUTH_KEYS_KEY);
+  await s.remove(LEGACY_AUTH_KEYS_KEY);
+  await cryptoSecureDelete(SECURE_SESSION_KEYS);
+  if (userRaw) {
+    try {
+      const u = JSON.parse(userRaw) as StoredUser;
+      if (u?.id) {
+        await cryptoSecureDelete(secureUserKeysKey(u.id));
+        await s.remove(LEGACY_AUTH_KEYS_PREFIX + u.id);
+      }
+    } catch {
+      /* ignore */
+    }
+  }
 }

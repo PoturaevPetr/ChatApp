@@ -6,7 +6,7 @@ import { getChatKeys } from "@/lib/secureStorage";
 import { getRooms, createRoom } from "@/services/chatRoomsApi";
 import { getMessages, getMessage, markMessageAsRead, type MessageResponse } from "@/services/chatMessagesApi";
 import { getReactionsBatch } from "@/services/chatReactionsApi";
-import { decryptMessage } from "@/lib/decryptMessage";
+import { decryptMessageForDevice } from "@/lib/decryptMessage";
 import { chatWebSocket } from "@/services/chatWebSocket";
 import {
   appendMessage,
@@ -19,11 +19,11 @@ import {
   blobToDataURL,
   dataUrlToBase64Payload,
 } from "@/lib/imageCompress";
+import { normalizeMediaMimeType } from "@/lib/mediaMime";
 import { encryptAttachmentBytes } from "@/lib/fileCrypto";
 import { uploadRoomAttachments } from "@/services/chatAttachmentsApi";
 import { clearAttachmentMediaCache } from "@/lib/attachmentMediaCache";
-import { encryptMessagePayloadForChatService } from "@/lib/chatE2E";
-import { getMyKeypair, getPublicKey } from "@/services/chatKeysApi";
+import { getOrCreateLocalDeviceId } from "@/lib/deviceIdentity";
 import { clearChatsListCache, readChatsListCache, writeChatsListCache } from "@/lib/chatsListCache";
 import {
   clearThreadMessagesCacheForUser,
@@ -121,6 +121,8 @@ export interface ChatListItem {
   groupCreatedBy?: string | null;
   /** Группа: участники для аватаров реакций и т.п. */
   groupMembers?: { id: string; avatar?: string | null }[];
+  /** Уведомления для этого чата (настройка room_user). */
+  notificationsEnabled?: boolean;
 }
 
 function threadId(a: string, b: string): string {
@@ -221,23 +223,37 @@ export function buildMessageContentFromDecrypt(content: Record<string, unknown> 
       : undefined;
   const fr = content.file_ref as {
     attachment_id?: string;
+    attachmentId?: string;
     thumb_attachment_id?: string;
+    thumbAttachmentId?: string;
     name?: string;
     mimeType?: string;
+    mime_type?: string;
     full_key_b64?: string;
     full_nonce_b64?: string;
     thumb_key_b64?: string;
     thumb_nonce_b64?: string;
   } | undefined;
-  if (fr && typeof fr.attachment_id === "string" && fr.attachment_id.length > 0) {
+  const attachmentIdRaw = fr?.attachment_id ?? fr?.attachmentId;
+  const attachmentId =
+    attachmentIdRaw != null && String(attachmentIdRaw).trim().length > 0
+      ? String(attachmentIdRaw).trim()
+      : "";
+  if (fr && attachmentId) {
+    const tidRaw = fr.thumb_attachment_id ?? fr.thumbAttachmentId;
     const tid =
-      typeof fr.thumb_attachment_id === "string" && fr.thumb_attachment_id.length > 0
-        ? fr.thumb_attachment_id
-        : undefined;
+      tidRaw != null && String(tidRaw).trim().length > 0 ? String(tidRaw).trim() : undefined;
     const fk = typeof fr.full_key_b64 === "string" ? fr.full_key_b64 : "";
     const fn = typeof fr.full_nonce_b64 === "string" ? fr.full_nonce_b64 : "";
+    const fileName = typeof fr.name === "string" && fr.name.trim() ? fr.name.trim() : "file";
+    const mimeRaw =
+      typeof fr.mimeType === "string"
+        ? fr.mimeType
+        : typeof fr.mime_type === "string"
+          ? fr.mime_type
+          : "";
     const ref: ChatMessageFileRef = {
-      attachment_id: fr.attachment_id,
+      attachment_id: attachmentId,
       full_key_b64: fk,
       full_nonce_b64: fn,
     };
@@ -249,8 +265,8 @@ export function buildMessageContentFromDecrypt(content: Record<string, unknown> 
       type: "file",
       text: text || undefined,
       file: {
-        name: typeof fr.name === "string" ? fr.name : "file",
-        mimeType: typeof fr.mimeType === "string" ? fr.mimeType : "application/octet-stream",
+        name: fileName,
+        mimeType: normalizeMediaMimeType(mimeRaw, fileName),
         data: "",
         file_ref: ref,
       },
@@ -383,6 +399,76 @@ async function mergeReactionsFromBatch(
   }
 }
 
+function chatMessageHasVisibleContent(content: ChatMessageContent): boolean {
+  if (content.type === "text") return Boolean(content.text?.trim());
+  if (content.type === "file") {
+    return Boolean(
+      content.text?.trim() ||
+        content.file.data?.trim() ||
+        content.file.file_ref?.attachment_id,
+    );
+  }
+  if (content.type === "location") return true;
+  if (content.type === "call_log") return true;
+  return false;
+}
+
+function mergeDecryptedWithCached(decrypted: ChatMessage, cached?: ChatMessage): ChatMessage {
+  if (!cached) return decrypted;
+  if (chatMessageHasVisibleContent(decrypted.content)) return decrypted;
+  if (!chatMessageHasVisibleContent(cached.content)) return decrypted;
+  return { ...decrypted, content: cached.content };
+}
+
+function latestVisibleChatMessage(messages: ChatMessage[]): ChatMessage | null {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (chatMessageHasVisibleContent(messages[i].content)) return messages[i];
+  }
+  return null;
+}
+
+function syncLastMessageToChatList(
+  get: () => ChatState,
+  set: (s: Partial<ChatState> | ((prev: ChatState) => Partial<ChatState>)) => void,
+  roomId: string | null,
+  otherUserId: string,
+  messages: ChatMessage[],
+  currentUserId?: string,
+): void {
+  const latest = latestVisibleChatMessage(messages);
+  if (!latest) return;
+  const otherLower = otherUserId.toLowerCase();
+  set((s) => {
+    const chats = s.chats.map((c) => {
+      const match = roomId ? c.id === roomId : String(c.otherUser.id).toLowerCase() === otherLower;
+      if (!match) return c;
+      const existing = c.lastMessage;
+      if (
+        existing &&
+        chatMessageHasVisibleContent(existing.content) &&
+        new Date(existing.timestamp).getTime() > new Date(latest.timestamp).getTime()
+      ) {
+        return c;
+      }
+      if (
+        existing?.id === latest.id &&
+        chatMessageHasVisibleContent(existing.content) &&
+        !chatMessageHasVisibleContent(latest.content)
+      ) {
+        return c;
+      }
+      return { ...c, lastMessage: latest, updatedAt: latest.timestamp };
+    });
+    chats.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+    return { chats };
+  });
+  if (currentUserId) {
+    queueMicrotask(() => {
+      void writeChatsListCache(currentUserId, get().chats);
+    });
+  }
+}
+
 async function buildChatMessagesFromApiResponses(
   forThisChat: MessageResponse[],
   me: string,
@@ -390,10 +476,16 @@ async function buildChatMessagesFromApiResponses(
   keys: { private_key: string },
   loadedForThread: string,
   { get, set }: ChatStoreGetSet,
+  cachedMessages?: ChatMessage[],
 ): Promise<ChatMessage[]> {
+  const { ensureSignalCryptoReady } = await import("@/lib/signalCryptoBootstrap");
+  await ensureSignalCryptoReady().catch(() => {});
+
+  const cachedById = new Map((cachedMessages ?? []).map((m) => [m.id, m]));
   const needFullFetch = forThisChat.filter(
     (m) => m.has_attachment && (!m.encrypted_data || !m.nonce),
   );
+  const localDeviceId = await getOrCreateLocalDeviceId().catch(() => null);
 
   const decrypted = await Promise.all(
     forThisChat.map(async (m) => {
@@ -416,22 +508,29 @@ async function buildChatMessagesFromApiResponses(
           isOwn: String(m.sender_id).toLowerCase() === me,
         };
       }
-      const content = await decryptMessage(
+      const content = await decryptMessageForDevice(
         m.encrypted_data!,
-        m.encrypted_aes_key,
         m.nonce!,
         keys.private_key,
+        {
+          encryptedAesKey: m.encrypted_aes_key,
+          deviceEnvelopes: m.device_envelopes,
+          localDeviceId,
+        }
       );
       const messageContent = buildMessageContentFromDecrypt(content as Record<string, unknown> | null);
-      return {
-        id: String(m.message_id),
-        senderId: String(m.sender_id),
-        recipientId: m.recipient_id ?? "",
-        content: messageContent,
-        timestamp: m.sent_at,
-        status: (m.is_read ? "read" : "delivered") as "read" | "delivered",
-        isOwn: String(m.sender_id).toLowerCase() === me,
-      };
+      return mergeDecryptedWithCached(
+        {
+          id: String(m.message_id),
+          senderId: String(m.sender_id),
+          recipientId: m.recipient_id ?? "",
+          content: messageContent,
+          timestamp: m.sent_at,
+          status: (m.is_read ? "read" : "delivered") as "read" | "delivered",
+          isOwn: String(m.sender_id).toLowerCase() === me,
+        },
+        cachedById.get(String(m.message_id)),
+      );
     }),
   );
 
@@ -443,12 +542,11 @@ async function buildChatMessagesFromApiResponses(
     const messageId = String(m.message_id);
     getMessage(accessToken, messageId).then((full) => {
       if (!full || get().activeChatId !== loadedForThread) return;
-      decryptMessage(
-        full.encrypted_data,
-        full.encrypted_aes_key,
-        full.nonce,
-        keys.private_key,
-      )
+      decryptMessageForDevice(full.encrypted_data, full.nonce, keys.private_key, {
+        encryptedAesKey: full.encrypted_aes_key,
+        deviceEnvelopes: full.device_envelopes,
+        localDeviceId,
+      })
         .then((content) => {
           if (!content || get().activeChatId !== loadedForThread) return;
           const messageContent = buildMessageContentFromDecrypt(content as Record<string, unknown> | null);
@@ -485,6 +583,7 @@ async function runLoadMessagesInner(
   silentRefresh: boolean,
   get: () => ChatState,
   set: (s: Partial<ChatState> | ((prev: ChatState) => Partial<ChatState>)) => void,
+  cachedMessages?: ChatMessage[],
 ): Promise<void> {
   const me = currentUserId.toLowerCase();
   const other = otherUserId.toLowerCase();
@@ -539,6 +638,7 @@ async function runLoadMessagesInner(
       keys,
       loadedForThread,
       gs,
+      cachedMessages ?? get().activeChatMessages,
     );
 
     const pageLen = apiMessages.length;
@@ -553,6 +653,7 @@ async function runLoadMessagesInner(
         activeChatNextOffset: pageLen,
         activeChatHasMoreOlder: hasMoreOlder,
       });
+      syncLastMessageToChatList(get, set, roomId, otherUserId, decrypted, currentUserId);
       queueMicrotask(() => persistActiveThreadSnapshot(get, true, currentUserId));
       if (roomId) {
         void mergeReactionsFromBatch(accessToken, roomId, loadedForThread, decrypted.map((m) => m.id), get, set);
@@ -634,6 +735,8 @@ interface ChatState {
   markAsRead: (currentUserId: string, otherUserId: string) => void;
   /** Удалить чат из списка (по roomId) локально. */
   removeChatByRoomId: (roomId: string) => void;
+  /** Локально обновить настройку уведомлений комнаты. */
+  setChatNotificationsEnabled: (roomId: string, enabled: boolean) => void;
   addIncomingWsMessage: (payload: {
     message_id: string;
     sender_id: string;
@@ -756,8 +859,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
           return;
         }
         set({ isFetchingChatList: true });
+        const { ensureSignalCryptoReady } = await import("@/lib/signalCryptoBootstrap");
+        await ensureSignalCryptoReady().catch(() => {});
         const currentId = currentUserId.toLowerCase();
         const keys = await getChatKeys();
+        const localDeviceId = await getOrCreateLocalDeviceId().catch(() => null);
         const rooms = await getRooms(tokens.access_token);
         const prevChats = get().chats;
 
@@ -803,22 +909,33 @@ export const useChatStore = create<ChatState>((set, get) => ({
             const unreadCount = typeof (room as unknown as { unread_count?: unknown }).unread_count === "number" ? (room as unknown as { unread_count: number }).unread_count : 0;
             if (room.last_message && keys?.private_key) {
               const lm = room.last_message;
-              const content = await decryptMessage(
+              const prevLast =
+                prevChats.find((c) => c.id === room.id)?.lastMessage ??
+                prevChats.find((c) => String(c.otherUser.id).toLowerCase() === String(other.id).toLowerCase())
+                  ?.lastMessage;
+              const content = await decryptMessageForDevice(
                 lm.encrypted_data,
-                lm.encrypted_aes_key,
                 lm.nonce,
-                keys.private_key
+                keys.private_key,
+                {
+                  encryptedAesKey: lm.encrypted_aes_key,
+                  deviceEnvelopes: lm.device_envelopes,
+                  localDeviceId,
+                }
               );
               const messageContent = buildMessageContentFromDecrypt(content as Record<string, unknown> | null);
-              lastMessage = {
-                id: String(lm.message_id),
-                senderId: String(lm.sender_id),
-                recipientId: lm.recipient_id ?? "",
-                content: messageContent,
-                timestamp: lm.sent_at,
-                status: lm.is_read ? "read" : "delivered",
-                isOwn: String(lm.sender_id).toLowerCase() === currentId,
-              };
+              lastMessage = mergeDecryptedWithCached(
+                {
+                  id: String(lm.message_id),
+                  senderId: String(lm.sender_id),
+                  recipientId: lm.recipient_id ?? "",
+                  content: messageContent,
+                  timestamp: lm.sent_at,
+                  status: lm.is_read ? "read" : "delivered",
+                  isOwn: String(lm.sender_id).toLowerCase() === currentId,
+                },
+                prevLast?.id === String(lm.message_id) ? prevLast : undefined,
+              );
               updatedAt = lm.sent_at;
             }
             return {
@@ -832,6 +949,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               groupMembers: isGroup
                 ? room.users.map((u) => ({ id: String(u.id), avatar: u.avatar ?? null }))
                 : undefined,
+              notificationsEnabled: room.notifications_enabled !== false,
             };
           })
         );
@@ -896,6 +1014,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         true,
         get,
         set,
+        get().activeChatMessages,
       );
       return;
     }
@@ -992,6 +1111,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           false,
           get,
           set,
+          (diskCache?.messages as ChatMessage[] | undefined) ?? get().activeChatMessages,
         );
       } finally {
         if (loadMessagesThreadId === tid) {
@@ -1046,6 +1166,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         keys,
         tid,
         { get, set },
+        get().activeChatMessages,
       );
 
       const newOffset = offset + apiMessages.length;
@@ -1099,7 +1220,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const base = fileParam as Partial<ChatMessageFile>;
         file = {
           name: base.name && base.name.trim() !== "" ? base.name : nf.name || "file",
-          mimeType: base.mimeType && base.mimeType.trim() !== "" ? base.mimeType : nf.type || "application/octet-stream",
+          mimeType: normalizeMediaMimeType(
+            base.mimeType && base.mimeType.trim() !== "" ? base.mimeType : nf.type || "",
+            base.name && base.name.trim() !== "" ? base.name : nf.name || "file",
+          ),
           data: typeof base.data === "string" ? base.data : "",
           nativeFile: nf,
         };
@@ -1346,9 +1470,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
     if (replyTo) payload.reply_to = { id: replyTo.id, preview: replyTo.preview };
 
-    const isPemPublicKey = (k: string | undefined | null): k is string =>
-      typeof k === "string" && k.includes("BEGIN PUBLIC KEY");
-
     const tokens = await getValidAuthTokens();
     if (!tokens?.access_token) {
       set({ error: "Нет авторизации" });
@@ -1359,24 +1480,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const isGroupSend =
       isGroupThreadPeerId(recipientId) || chatRowForSend?.roomType === "group";
 
-    const localKeys = await getChatKeys();
-    let senderPublicPem = localKeys?.public_key ?? null;
-    if (!isPemPublicKey(senderPublicPem)) {
-      try {
-        const me = await getMyKeypair(tokens.access_token);
-        senderPublicPem = me.public_key;
-      } catch {
-        senderPublicPem = null;
-      }
-    }
-    if (!isPemPublicKey(senderPublicPem)) {
-      set({ error: "Не удалось получить ключи шифрования" });
-      return null;
-    }
-
-    let e2ePayload: Awaited<ReturnType<typeof encryptMessagePayloadForChatService>>;
+    let memberIds: string[];
     if (isGroupSend && roomId) {
-      let memberIds = Array.from(
+      memberIds = Array.from(
         new Set((chatRowForSend?.groupMembers ?? []).map((m) => String(m.id)))
       );
       if (memberIds.length < 2) {
@@ -1392,27 +1498,52 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set({ error: "Не удалось определить участников группы для шифрования" });
         return null;
       }
-      const readerKeys = await Promise.all(
-        memberIds.map(async (uid) => {
-          const row = await getPublicKey(tokens.access_token, uid);
-          return { userId: uid, publicKeyPem: row.public_key };
-        })
-      );
-      if (readerKeys.some((r) => !isPemPublicKey(r.publicKeyPem))) {
-        set({ error: "Не удалось получить ключи шифрования" });
-        return null;
-      }
-      e2ePayload = await encryptMessagePayloadForChatService(payload, readerKeys);
     } else {
-      const recipientPublic = await getPublicKey(tokens.access_token, recipientId);
-      if (!isPemPublicKey(recipientPublic.public_key)) {
-        set({ error: "Не удалось получить ключи шифрования" });
+      memberIds = [String(recipientId), String(currentUserId)];
+    }
+
+    let e2ePayload: {
+      protocol: string;
+      encrypted_data: string;
+      nonce: string;
+      envelopes: unknown[];
+      recipient_keys: Array<{ user_id: string; encrypted_aes_key: string }>;
+    };
+    try {
+      const { maybeReplenishPrekeys } = await import("@/services/chatDevicesApi");
+      void maybeReplenishPrekeys(tokens.access_token).catch(() => {});
+      const { collectSignalTargetsForUsers } = await import("@/lib/collectSignalTargets");
+      const { encryptMessagePayloadSignalV1 } = await import("@/lib/signalE2E");
+      const signalTargets = await collectSignalTargetsForUsers(tokens.access_token, memberIds);
+      if (!signalTargets || signalTargets.length === 0) {
+        set({
+          error:
+            "Нет Signal-ключей у участников. Все должны войти в приложение (регистрация устройства).",
+        });
         return null;
       }
-      e2ePayload = await encryptMessagePayloadForChatService(payload, [
-        { userId: recipientId, publicKeyPem: recipientPublic.public_key },
-        { userId: currentUserId, publicKeyPem: senderPublicPem },
-      ]);
+      const localDeviceId = await getOrCreateLocalDeviceId();
+      if (isGroupSend && roomId) {
+        const { encryptGroupSenderKeyV0 } = await import("@/lib/senderKeys");
+        e2ePayload = await encryptGroupSenderKeyV0({
+          roomId,
+          payload,
+          senderUserId: String(currentUserId),
+          senderDeviceId: localDeviceId,
+          signalTargets,
+        });
+      } else {
+        e2ePayload = await encryptMessagePayloadSignalV1(
+          payload,
+          signalTargets,
+          String(currentUserId),
+          localDeviceId
+        );
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Не удалось получить ключи устройств";
+      set({ error: msg });
+      return null;
     }
 
     if (roomId && chatWebSocket.isConnected()) {
@@ -1586,11 +1717,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const full = await getMessage(tokens.access_token, messageId);
       if (!full) return;
       const me = currentUserId.toLowerCase();
-      const content = await decryptMessage(
+      const localDeviceId = await getOrCreateLocalDeviceId().catch(() => null);
+      const content = await decryptMessageForDevice(
         full.encrypted_data,
-        full.encrypted_aes_key,
         full.nonce,
         keys.private_key,
+        {
+          encryptedAesKey: full.encrypted_aes_key,
+          deviceEnvelopes: full.device_envelopes,
+          localDeviceId,
+        }
       );
       if (!content) return;
       const messageContent = buildMessageContentFromDecrypt(content as Record<string, unknown> | null);
@@ -1685,6 +1821,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const id = String(roomId || "");
     if (!id) return;
     set((s) => ({ chats: s.chats.filter((c) => String(c.id) !== id) }));
+  },
+
+  setChatNotificationsEnabled: (roomId: string, enabled: boolean) => {
+    const id = String(roomId || "");
+    if (!id) return;
+    set((s) => ({
+      chats: s.chats.map((c) => (String(c.id) === id ? { ...c, notificationsEnabled: enabled } : c)),
+    }));
+    const uid = get().chatsLoadedForUserId;
+    if (uid) void writeChatsListCache(uid, get().chats);
   },
 
   rejoinRoomIfNeeded: () => {

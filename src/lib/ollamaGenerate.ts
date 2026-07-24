@@ -1,30 +1,16 @@
 /**
  * Клиент Ollama `/api/generate` (без stream).
- * URL: NEXT_PUBLIC_OLLAMA_BASE_URL. Модель: localStorage или NEXT_PUBLIC_OLLAMA_MODEL.
- * Ключ: NEXT_PUBLIC_OLLAMA_API_KEY → Authorization: Bearer … (или NEXT_PUBLIC_OLLAMA_API_KEY_HEADER).
- *
- * На **мобильных** в capacitor.config включён `CapacitorHttp.enabled: true` — fetch идёт через нативный
- * стек (без CORS WebView). Явный CapacitorHttp.request даёт большие таймауты для долгого generate.
- *
- * Сборка APK: ключ должен быть в окружении при `npm run build` (например `.env.local`), иначе в бандле
- * не будет NEXT_PUBLIC_OLLAMA_API_KEY → nginx вернёт 401.
- *
- * **Браузер + `npm run dev`:** `/api/ollama-proxy/...` (rewrite в next.config).
- * **Браузер + Docker:** `NEXT_PUBLIC_OLLAMA_USE_SAME_ORIGIN_PROXY=true` — тот же путь, прокси в nginx контейнера.
- * **Мобильное приложение:** всегда прямой `NEXT_PUBLIC_OLLAMA_BASE_URL` (CapacitorHttp), флаг прокси не используется.
+ * URL и ключ — только с ChatService (GET /api/v1/llm/access, расшифровка на клиенте).
+ * Запросы идут напрямую на LLM API (без same-origin proxy).
+ * Модель: localStorage или NEXT_PUBLIC_OLLAMA_MODEL.
  */
 
 import { Capacitor, CapacitorHttp } from "@capacitor/core";
 import { getActiveOllamaModel } from "@/lib/ollamaModelPreference";
+import { getLlmCredentialsSnapshot } from "@/stores/llmAccessStore";
 
 function trimTrailingSlash(url: string): string {
   return url.replace(/\/+$/, "");
-}
-
-export function getOllamaBaseUrl(): string {
-  const fromEnv = process.env.NEXT_PUBLIC_OLLAMA_BASE_URL?.trim();
-  if (fromEnv) return trimTrailingSlash(fromEnv);
-  return "https://llm.oclinica.ru";
 }
 
 export function getOllamaModel(): string {
@@ -32,15 +18,15 @@ export function getOllamaModel(): string {
 }
 
 function getOllamaAuthHeaders(): Record<string, string> {
-  const key = process.env.NEXT_PUBLIC_OLLAMA_API_KEY?.trim();
-  if (!key) return {};
+  const { apiKey, apiKeyHeader } = getLlmCredentialsSnapshot();
+  if (!apiKey) return {};
 
-  const customHeader = process.env.NEXT_PUBLIC_OLLAMA_API_KEY_HEADER?.trim();
+  const customHeader = apiKeyHeader?.trim();
   if (customHeader) {
-    return { [customHeader]: key };
+    return { [customHeader]: apiKey };
   }
 
-  return { Authorization: `Bearer ${key}` };
+  return { Authorization: `Bearer ${apiKey}` };
 }
 
 function mergeHeaders(base: Record<string, string>): Record<string, string> {
@@ -56,20 +42,20 @@ function useCapacitorOllama(): boolean {
   }
 }
 
-function ollamaUseSameOriginProxy(): boolean {
-  return process.env.NEXT_PUBLIC_OLLAMA_USE_SAME_ORIGIN_PROXY === "true";
+function assertLlmAccess(): { baseUrl: string } {
+  const { enabled, apiKey, baseUrl } = getLlmCredentialsSnapshot();
+  const url = baseUrl?.trim();
+  if (!enabled || !apiKey || !url) {
+    throw new Error("Нет доступа к LLM. Обратитесь к администратору чата.");
+  }
+  return { baseUrl: trimTrailingSlash(url) };
 }
 
-/** В dev и Docker-вебе — same-origin `/api/ollama-proxy`. В APK — прямой URL llm. */
-function ollamaUrlForWebFetch(path: string): string {
+/** Прямой URL Ollama API (base_url с ChatService + path). */
+function ollamaDirectUrl(path: string): string {
+  const { baseUrl } = assertLlmAccess();
   const p = path.startsWith("/") ? path : `/${path}`;
-  if (
-    typeof window !== "undefined" &&
-    (process.env.NODE_ENV === "development" || ollamaUseSameOriginProxy())
-  ) {
-    return `/api/ollama-proxy${p}`;
-  }
-  return `${getOllamaBaseUrl()}${p}`;
+  return `${baseUrl}${p}`;
 }
 
 /** Явный нативный запрос: стабильные таймауты (долгий generate). */
@@ -78,11 +64,8 @@ async function ollamaNativeRequest(
   path: string,
   jsonBody?: object,
 ): Promise<{ ok: boolean; status: number; raw: string }> {
-  const p = path.startsWith("/") ? path : `/${path}`;
-  const url = `${getOllamaBaseUrl()}${p}`;
-  const headers = mergeHeaders(
-    jsonBody ? { "Content-Type": "application/json" } : {},
-  );
+  const url = ollamaDirectUrl(path);
+  const headers = mergeHeaders(jsonBody ? { "Content-Type": "application/json" } : {});
 
   try {
     const res = await CapacitorHttp.request({
@@ -95,8 +78,7 @@ async function ollamaNativeRequest(
       readTimeout: 180_000,
     });
 
-    const raw =
-      typeof res.data === "string" ? res.data : JSON.stringify(res.data ?? "");
+    const raw = typeof res.data === "string" ? res.data : JSON.stringify(res.data ?? "");
     return {
       ok: res.status >= 200 && res.status < 300,
       status: res.status,
@@ -104,19 +86,7 @@ async function ollamaNativeRequest(
     };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    throw new Error(
-      `Ollama (сеть): ${msg}. Проверьте интернет, сертификат llm, nginx и что APK собран с NEXT_PUBLIC_OLLAMA_API_KEY.`,
-    );
-  }
-}
-
-function assertApiKeyForNative(): void {
-  if (!useCapacitorOllama()) return;
-  const h = getOllamaAuthHeaders();
-  if (Object.keys(h).length === 0) {
-    throw new Error(
-      "Ollama: в приложении нет API-ключа. Пересоберите APK с .env / NEXT_PUBLIC_OLLAMA_API_KEY при npm run build.",
-    );
+    throw new Error(`Ollama (сеть): ${msg}. Проверьте интернет и доступ LLM в настройках аккаунта.`);
   }
 }
 
@@ -125,7 +95,7 @@ export type OllamaTagsResponse = {
 };
 
 export async function fetchOllamaModels(signal?: AbortSignal): Promise<string[]> {
-  assertApiKeyForNative();
+  assertLlmAccess();
 
   let raw: string;
   let status: number;
@@ -137,7 +107,7 @@ export async function fetchOllamaModels(signal?: AbortSignal): Promise<string[]>
     status = r.status;
     ok = r.ok;
   } else {
-    const res = await fetch(ollamaUrlForWebFetch("/api/tags"), {
+    const res = await fetch(ollamaDirectUrl("/api/tags"), {
       signal,
       headers: mergeHeaders({}),
     });
@@ -171,7 +141,7 @@ export type OllamaGenerateResponse = {
 };
 
 export async function ollamaGenerate(prompt: string, signal?: AbortSignal): Promise<string> {
-  assertApiKeyForNative();
+  assertLlmAccess();
 
   const body = {
     model: getOllamaModel(),
@@ -189,7 +159,7 @@ export async function ollamaGenerate(prompt: string, signal?: AbortSignal): Prom
     status = r.status;
     ok = r.ok;
   } else {
-    const res = await fetch(ollamaUrlForWebFetch("/api/generate"), {
+    const res = await fetch(ollamaDirectUrl("/api/generate"), {
       method: "POST",
       headers: mergeHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(body),
