@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Bell, ImageIcon, ChevronRight } from "lucide-react";
-import { useMediaMinMd } from "@/hooks/useMediaMinMd";
+import { useClientDeviceKind } from "@/hooks/useClientDeviceKind";
 import {
   BOTTOM_SHEET_ANIM_MS,
   bottomSheetBackdropBaseClass,
@@ -99,8 +99,8 @@ export function ChatSettingsSheet({
   notificationsBusy = false,
   onOpenWallpaperPicker,
 }: ChatSettingsSheetProps) {
-  const isDesktop = useMediaMinMd();
-  const animMs = isDesktop ? CENTER_MODAL_ANIM_MS : BOTTOM_SHEET_ANIM_MS;
+  const { preferCenterModal } = useClientDeviceKind();
+  const animMs = preferCenterModal ? CENTER_MODAL_ANIM_MS : BOTTOM_SHEET_ANIM_MS;
   const [isVisible, setIsVisible] = useState(false);
   const [isExiting, setIsExiting] = useState(false);
 
@@ -145,7 +145,7 @@ export function ChatSettingsSheet({
     closeThenOpenWallpaper,
   };
 
-  if (isDesktop) {
+  if (preferCenterModal) {
     return (
       <div
         className={centerModalRootClass}

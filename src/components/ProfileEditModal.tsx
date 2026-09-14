@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Loader2, X } from "lucide-react";
-import { useMediaMinMd } from "@/hooks/useMediaMinMd";
+import { useClientDeviceKind } from "@/hooks/useClientDeviceKind";
 import { getValidAuthTokens } from "@/lib/validAuthToken";
 import { chatAuthApi, type MeResponse } from "@/services/chatAuthApi";
 import {
@@ -193,8 +193,8 @@ function ProfileEditContent({
 }
 
 export function ProfileEditModal({ isOpen, onClose, source, onSaved }: ProfileEditModalProps) {
-  const isDesktop = useMediaMinMd();
-  const animMs = isDesktop ? CENTER_MODAL_ANIM_MS : BOTTOM_SHEET_ANIM_MS;
+  const { preferCenterModal } = useClientDeviceKind();
+  const animMs = preferCenterModal ? CENTER_MODAL_ANIM_MS : BOTTOM_SHEET_ANIM_MS;
   const [isVisible, setIsVisible] = useState(false);
   const [isExiting, setIsExiting] = useState(false);
   const [firstName, setFirstName] = useState("");
@@ -291,7 +291,7 @@ export function ProfileEditModal({ isOpen, onClose, source, onSaved }: ProfileEd
     onSave: handleSave,
   };
 
-  if (isDesktop) {
+  if (preferCenterModal) {
     return (
       <div
         className={centerModalRootClass}

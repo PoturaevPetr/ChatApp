@@ -7,6 +7,8 @@
 #
 # Мобильное APK: ./build-apk.sh (использует .env.local, не этот compose).
 
+name: weeknotes-chat-web
+
 services:
   chatapp:
     build:
@@ -18,14 +20,14 @@ services:
         NEXT_PUBLIC_MEET_SERVICE_URL: ${NEXT_PUBLIC_MEET_SERVICE_URL:-}
         NEXT_PUBLIC_TRANSCRIBE_URL: ${NEXT_PUBLIC_TRANSCRIBE_URL:-}
         NEXT_PUBLIC_OAUTH_NATIVE_BRIDGE_URL: ${NEXT_PUBLIC_OAUTH_NATIVE_BRIDGE_URL:-}
-    image: kindred-chatapp:local
-    container_name: kindred_chatapp
+    image: weeknotes-chat-web:local
+    container_name: weeknotes-chat-web
     restart: unless-stopped
     ports:
       - "${CHATAPP_HTTP_PORT:-3080}:80"
     networks:
-      - kindred-front
+      - weeknotes-front
 
 networks:
-  kindred-front:
+  weeknotes-front:
     driver: bridge

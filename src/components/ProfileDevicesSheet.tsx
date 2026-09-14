@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { X } from "lucide-react";
-import { useMediaMinMd } from "@/hooks/useMediaMinMd";
+import { useClientDeviceKind } from "@/hooks/useClientDeviceKind";
 import { DevicesPanel } from "@/components/DevicesPanel";
 import {
   CENTER_MODAL_ANIM_MS,
@@ -24,8 +24,8 @@ interface ProfileDevicesSheetProps {
 }
 
 export function ProfileDevicesSheet({ open, onClose }: ProfileDevicesSheetProps) {
-  const isDesktop = useMediaMinMd();
-  const animMs = isDesktop ? CENTER_MODAL_ANIM_MS : MOBILE_ANIM_MS;
+  const { preferCenterModal } = useClientDeviceKind();
+  const animMs = preferCenterModal ? CENTER_MODAL_ANIM_MS : MOBILE_ANIM_MS;
   const [isVisible, setIsVisible] = useState(false);
   const [isExiting, setIsExiting] = useState(false);
 
@@ -61,7 +61,7 @@ export function ProfileDevicesSheet({ open, onClose }: ProfileDevicesSheetProps)
 
   if (!open) return null;
 
-  if (isDesktop) {
+  if (preferCenterModal) {
     return (
       <div
         className={centerModalRootClass}

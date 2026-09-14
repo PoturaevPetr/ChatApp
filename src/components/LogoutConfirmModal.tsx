@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { LogOut } from "lucide-react";
-import { useMediaMinMd } from "@/hooks/useMediaMinMd";
+import { useClientDeviceKind } from "@/hooks/useClientDeviceKind";
 import {
   BOTTOM_SHEET_ANIM_MS,
   bottomSheetBackdropBaseClass,
@@ -69,8 +69,8 @@ function LogoutConfirmContent({ canConfirm, onClose, onConfirm, centered = false
 }
 
 export function LogoutConfirmModal({ isOpen, onClose, onConfirm }: LogoutConfirmModalProps) {
-  const isDesktop = useMediaMinMd();
-  const animMs = isDesktop ? CENTER_MODAL_ANIM_MS : BOTTOM_SHEET_ANIM_MS;
+  const { preferCenterModal } = useClientDeviceKind();
+  const animMs = preferCenterModal ? CENTER_MODAL_ANIM_MS : BOTTOM_SHEET_ANIM_MS;
   const [isVisible, setIsVisible] = useState(false);
   const [isExiting, setIsExiting] = useState(false);
   const [canConfirm, setCanConfirm] = useState(false);
@@ -123,7 +123,7 @@ export function LogoutConfirmModal({ isOpen, onClose, onConfirm }: LogoutConfirm
     onConfirm: handleConfirm,
   };
 
-  if (isDesktop) {
+  if (preferCenterModal) {
     return (
       <div
         className={centerModalRootClass}
