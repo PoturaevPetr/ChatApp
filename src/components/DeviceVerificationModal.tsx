@@ -16,7 +16,7 @@ import { setChatKeys, setChatKeysForUser } from "@/lib/secureStorage";
 const MODAL_Z = 10080;
 
 export function DeviceVerificationModal() {
-  const { user, needsKeyRestore, clearNeedsKeyRestore } = useAuthStore();
+  const { user, needsKeyRestore, clearNeedsKeyRestore, logout } = useAuthStore();
   const reloadChats = useChatStore((s) => s.loadChats);
 
   const [open, setOpen] = useState(false);
@@ -203,11 +203,10 @@ export function DeviceVerificationModal() {
           </div>
           <button
             type="button"
-            onClick={() => setOpen(false)}
-            className="rounded-full p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
-            aria-label="Пропустить"
+            onClick={() => void logout()}
+            className="text-xs text-destructive/80 hover:text-destructive hover:underline px-2 py-1"
           >
-            <X size={18} />
+            Выйти
           </button>
         </div>
 

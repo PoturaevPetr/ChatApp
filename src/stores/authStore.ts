@@ -102,6 +102,8 @@ export interface RegisterData {
   last_name: string;
   middle_name: string;
   birth_date: string; // YYYY-MM-DD
+  recoveryPassword?: string;
+  skipBackup?: boolean;
 }
 
 interface AuthState {
@@ -371,8 +373,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     set({ isLoading: true, error: null });
     try {
       const identity = await getOrCreateLocalDeviceIdentity();
+      const { recoveryPassword, skipBackup, ...apiData } = data;
       const res = await chatAuthApi.register({
-        ...data,
+        ...apiData,
         public_key: identity.publicKeyPem,
       });
       await setChatKeysForUser(String(res.user_id), {
@@ -385,15 +388,19 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       } catch {
         /* ignore */
       }
-      // Zero-Knowledge cloud backup: encrypt private key with password and store on server
-      if (data.password && data.password.length >= 6) {
-        try {
-          const { encryptPrivateKeyBackup } = await import("@/lib/keyBackupCrypto");
-          const { putKeyBackup } = await import("@/services/chatKeysApi");
-          const backupPayload = await encryptPrivateKeyBackup(identity.privateKeyPem, data.password);
-          await putKeyBackup(res.access_token, backupPayload);
-        } catch {
-          /* ignore backup failure on register */
+      // Zero-Knowledge cloud backup: encrypt private key and store on server unless skipped
+      if (!skipBackup) {
+        const passphrase =
+          recoveryPassword && recoveryPassword.length >= 6 ? recoveryPassword : data.password;
+        if (passphrase && passphrase.length >= 6) {
+          try {
+            const { encryptPrivateKeyBackup } = await import("@/lib/keyBackupCrypto");
+            const { putKeyBackup } = await import("@/services/chatKeysApi");
+            const backupPayload = await encryptPrivateKeyBackup(identity.privateKeyPem, passphrase);
+            await putKeyBackup(res.access_token, backupPayload);
+          } catch {
+            /* ignore backup failure on register */
+          }
         }
       }
       set({

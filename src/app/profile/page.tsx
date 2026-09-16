@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { AuthGuard } from "@/components/AuthGuard";
 import { Layout } from "@/components/Layout";
 import { LogoutConfirmModal } from "@/components/LogoutConfirmModal";
@@ -83,10 +83,23 @@ export default function ProfilePage() {
   const [showKeyBackupModal, setShowKeyBackupModal] = useState(false);
   const [showDevicesSheet, setShowDevicesSheet] = useState(false);
   const [keyBackupMode, setKeyBackupMode] = useState<"create" | "restore">("create");
+  const [backupStatus, setBackupStatus] = useState<"checking" | "active" | "not_set">("checking");
   const [isUploadingAvatar, setIsUploadingAvatar] = useState(false);
   const [avatarError, setAvatarError] = useState<string | null>(null);
   const [appVersionText, setAppVersionText] = useState<string>("");
   const avatarGalleryInputRef = useRef<HTMLInputElement | null>(null);
+
+  const refreshBackupStatus = useCallback(async () => {
+    const tokens = await getValidAuthTokens();
+    if (!tokens?.access_token) return;
+    try {
+      const { getKeyBackup } = await import("@/services/chatKeysApi");
+      await getKeyBackup(tokens.access_token);
+      setBackupStatus("active");
+    } catch {
+      setBackupStatus("not_set");
+    }
+  }, []);
 
   const saveAvatar = async (dataUrl: string) => {
     const tokens = await getValidAuthTokens();
@@ -140,6 +153,7 @@ export default function ProfilePage() {
         if (!cancelled) {
           setProfile(meToProfile(data));
           setHasChatKeys(!!keys?.private_key);
+          void refreshBackupStatus();
         }
       } catch (e) {
         if (!cancelled) setLoadError(e instanceof Error ? e.message : "Ошибка загрузки");
@@ -150,7 +164,7 @@ export default function ProfilePage() {
     return () => {
       cancelled = true;
     };
-  }, [user?.id]);
+  }, [user?.id, refreshBackupStatus]);
 
   useEffect(() => {
     let cancelled = false;
@@ -227,8 +241,14 @@ export default function ProfilePage() {
                   <ProfileSettingsSection title="Безопасность">
                     <ProfileSettingsRow
                       icon={KeyRound}
-                      label="Резервная копия ключа"
-                      subtitle="Шифрование сообщений на этом устройстве"
+                      label="Облачный пароль восстановления"
+                      subtitle={
+                        backupStatus === "active"
+                          ? "Активен • Защита переписки включена"
+                          : backupStatus === "not_set"
+                            ? "Не настроен • Нажмите для настройки"
+                            : "Загрузка статуса..."
+                      }
                       onClick={() => {
                         setKeyBackupMode(hasChatKeys ? "create" : "restore");
                         setShowKeyBackupModal(true);
@@ -317,11 +337,15 @@ export default function ProfilePage() {
         <KeyBackupModal
           open={showKeyBackupModal}
           initialMode={keyBackupMode}
+          onSuccess={() => {
+            void refreshBackupStatus();
+          }}
           onClose={() => {
             setShowKeyBackupModal(false);
             void (async () => {
               const keys = await getChatKeys();
               setHasChatKeys(!!keys?.private_key);
+              void refreshBackupStatus();
             })();
           }}
         />
