@@ -12,6 +12,8 @@ import { MeetCallProvider } from "@/contexts/MeetCallContext";
 import { useMediaMinMd } from "@/hooks/useMediaMinMd";
 import { chatListSidebarMd } from "@/lib/chatListSidebar";
 
+import { DeviceVerificationModal } from "@/components/DeviceVerificationModal";
+
 export function Layout({ children }: { children: React.ReactNode }) {
   const { user } = useAuthStore();
   const isWide = useMediaMinMd();
@@ -41,6 +43,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
     <MeetCallProvider>
     <div className="relative flex h-full min-h-0 flex-col bg-background">
       <WebSocketInitializer />
+      <DeviceVerificationModal />
       {!hideTopBar ? (
         <header
           className={

@@ -11,6 +11,7 @@
     "start": "next start",
     "lint": "next lint",
     "type-check": "tsc --noEmit",
+    "test": "node scripts/test-key-backup.mjs",
     "cap:init": "cap init",
     "cap:add:android": "cap add android",
     "cap:add:ios": "cap add ios",

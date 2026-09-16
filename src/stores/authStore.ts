@@ -224,10 +224,64 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         // device register best-effort
       }
       void useLlmAccessStore.getState().refresh();
-      const keys = await resolveChatKeys(String(res.user_id));
-      // After device ensure, keys often live in crypto secure storage → sync to session
-      const { getChatKeys } = await import("@/lib/secureStorage");
-      const sessionKeys = (await getChatKeys()) ?? keys;
+      let keys = await resolveChatKeys(String(res.user_id));
+      const { getChatKeys, setChatKeys, setChatKeysForUser } = await import("@/lib/secureStorage");
+      let sessionKeys = (await getChatKeys()) ?? keys;
+
+      // Если локального ключа нет, но передан пароль — пробуем автоматически восстановить из облачного бэкапа
+      if (!sessionKeys?.private_key && password && password.length >= 6) {
+        try {
+          const { getKeyBackup } = await import("@/services/chatKeysApi");
+          const { decryptPrivateKeyBackup } = await import("@/lib/keyBackupCrypto");
+          const { getOrCreateLocalDeviceIdentity } = await import("@/lib/deviceIdentity");
+
+          const remote = await getKeyBackup(res.access_token);
+          const restoredPem = await decryptPrivateKeyBackup(
+            {
+              ciphertext: remote.ciphertext,
+              kdf: "pbkdf2-sha256",
+              kdf_salt_b64: remote.kdf_salt_b64,
+              kdf_params: { iterations: Number(remote.kdf_params?.iterations) || 310000 },
+              wrap_alg: "aes-256-gcm",
+              nonce_b64: remote.nonce_b64,
+            },
+            password
+          );
+
+          const localIdent = await getOrCreateLocalDeviceIdentity();
+          const restoredKeys: StoredChatKeys = {
+            public_key: localIdent.publicKeyPem,
+            private_key: restoredPem,
+          };
+          await setChatKeys(restoredKeys);
+          await setChatKeysForUser(String(res.user_id), restoredKeys);
+          sessionKeys = restoredKeys;
+        } catch {
+          // Если бэкапа нет или пароль не подошел (например, другой пароль у бэкапа) — покажем модалку
+        }
+      }
+
+      // Если у нас уже есть локальный приватный ключ, а бэкапа на сервере нет — обновим бэкап
+      if (sessionKeys?.private_key && password && password.length >= 6) {
+        try {
+          const { getKeyBackup, putKeyBackup } = await import("@/services/chatKeysApi");
+          const { encryptPrivateKeyBackup } = await import("@/lib/keyBackupCrypto");
+          let hasBackup = false;
+          try {
+            await getKeyBackup(res.access_token);
+            hasBackup = true;
+          } catch {
+            hasBackup = false;
+          }
+          if (!hasBackup) {
+            const payload = await encryptPrivateKeyBackup(sessionKeys.private_key, password);
+            await putKeyBackup(res.access_token, payload);
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+
       await setAuthWithTokens(
         enriched,
         {
@@ -330,6 +384,17 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         await ensureDeviceRegistered(res.access_token);
       } catch {
         /* ignore */
+      }
+      // Zero-Knowledge cloud backup: encrypt private key with password and store on server
+      if (data.password && data.password.length >= 6) {
+        try {
+          const { encryptPrivateKeyBackup } = await import("@/lib/keyBackupCrypto");
+          const { putKeyBackup } = await import("@/services/chatKeysApi");
+          const backupPayload = await encryptPrivateKeyBackup(identity.privateKeyPem, data.password);
+          await putKeyBackup(res.access_token, backupPayload);
+        } catch {
+          /* ignore backup failure on register */
+        }
       }
       set({
         isLoading: false,
