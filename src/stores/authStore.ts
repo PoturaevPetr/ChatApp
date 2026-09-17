@@ -8,7 +8,8 @@ import {
   getChatKeys,
   setAuthWithTokens,
   setChatKeys,
-  clearAuthData,
+  clearSession,
+  wipeAllDeviceData,
   getChatKeysForUser,
   setChatKeysForUser,
   type StoredUser,
@@ -220,46 +221,19 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         name: res.username,
       };
       const enriched = await fetchStoredUserProfile(res.access_token, user);
-      try {
-        await ensureDeviceRegistered(res.access_token);
-      } catch {
-        // device register best-effort
-      }
       void useLlmAccessStore.getState().refresh();
-      let keys = await resolveChatKeys(String(res.user_id));
-      const { getChatKeys, setChatKeys, setChatKeysForUser } = await import("@/lib/secureStorage");
-      let sessionKeys = (await getChatKeys()) ?? keys;
+      const { getChatKeysForUser } = await import("@/lib/secureStorage");
+      const sessionKeys = await getChatKeysForUser(String(res.user_id));
 
-      // Если локального ключа нет, но передан пароль — пробуем автоматически восстановить из облачного бэкапа
-      if (!sessionKeys?.private_key && password && password.length >= 6) {
+      // Если ключа нет в локальной памяти (после логаута или на новом устройстве) — требуем подтверждения через QR или облачный пароль
+      const needsRestore = !sessionKeys?.private_key;
+
+      // Если ключ есть локально — регистрируем устройство
+      if (sessionKeys?.private_key) {
         try {
-          const { getKeyBackup } = await import("@/services/chatKeysApi");
-          const { decryptPrivateKeyBackup } = await import("@/lib/keyBackupCrypto");
-          const { getOrCreateLocalDeviceIdentity } = await import("@/lib/deviceIdentity");
-
-          const remote = await getKeyBackup(res.access_token);
-          const restoredPem = await decryptPrivateKeyBackup(
-            {
-              ciphertext: remote.ciphertext,
-              kdf: "pbkdf2-sha256",
-              kdf_salt_b64: remote.kdf_salt_b64,
-              kdf_params: { iterations: Number(remote.kdf_params?.iterations) || 310000 },
-              wrap_alg: "aes-256-gcm",
-              nonce_b64: remote.nonce_b64,
-            },
-            password
-          );
-
-          const localIdent = await getOrCreateLocalDeviceIdentity();
-          const restoredKeys: StoredChatKeys = {
-            public_key: localIdent.publicKeyPem,
-            private_key: restoredPem,
-          };
-          await setChatKeys(restoredKeys);
-          await setChatKeysForUser(String(res.user_id), restoredKeys);
-          sessionKeys = restoredKeys;
+          await ensureDeviceRegistered(res.access_token);
         } catch {
-          // Если бэкапа нет или пароль не подошел (например, другой пароль у бэкапа) — покажем модалку
+          // device register best-effort
         }
       }
 
@@ -427,7 +401,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   logout: async () => {
-    await clearAuthData();
+    const currentUserId = get().user?.id;
+    await clearSession();
+    if (currentUserId) {
+      const { deleteChatKeysForUser } = await import("@/lib/secureStorage");
+      await deleteChatKeysForUser(currentUserId);
+    }
     useChatStore.getState().resetSession();
     useLlmAccessStore.getState().clear();
     set({ user: null, isAuthenticated: false, error: null, needsKeyRestore: false });

@@ -716,8 +716,10 @@ interface ChatState {
   setPeerTyping: (roomId: string, userId: string, isTyping: boolean) => void;
   loadUsers: () => void;
   loadChats: (currentUserId: string, options?: LoadChatsOptions) => Promise<void>;
-  /** Сброс чата при выходе из аккаунта */
+  /** Сброс чата при выходе из аккаунта (сохраняет кэш на диске) */
   resetSession: () => void;
+  /** Полное удаление кэша сообщений и данных устройства */
+  wipeAllDeviceData: () => Promise<void>;
   loadMessages: (currentUserId: string, otherUserId: string, silentRefresh?: boolean) => Promise<void>;
   /** Подгрузить более старые сообщения (по 20) при скролле к верху ленты. */
   loadOlderMessages: (currentUserId: string) => Promise<void>;
@@ -765,11 +767,17 @@ interface ChatState {
   applyRoomMemberRemoved: (roomId: string, removedUserId: string, currentUserId: string) => void;
   /** События user_online / user_offline для подписи «в сети» / last seen. */
   updatePeerPresence: (userId: string, online: boolean, atIso?: string) => void;
+  draftsByRoomId: Record<string, string>;
+  loadDrafts: (userId: string) => Promise<void>;
+  setDraftLocally: (roomId: string, text: string) => void;
+  saveDraftToServer: (roomId: string, text: string) => Promise<void>;
+  deleteDraftFromServer: (roomId: string) => Promise<void>;
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
   users: [],
   chats: [],
+  draftsByRoomId: {},
   chatsLoadedForUserId: null,
   activeChatId: null,
   activeRoomId: null,
@@ -802,6 +810,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({
       users: [],
       chats: [],
+      draftsByRoomId: {},
       chatsLoadedForUserId: null,
       activeChatId: null,
       activeRoomId: null,
@@ -819,6 +828,119 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
   },
 
+  wipeAllDeviceData: async () => {
+    const uid = get().chatsLoadedForUserId;
+    loadChatsPromise = null;
+    loadMessagesPromise = null;
+    loadMessagesThreadId = null;
+    clearAttachmentMediaCache();
+    await clearChatsListCache();
+    if (uid) await clearThreadMessagesCacheForUser(uid);
+    get().resetSession();
+  },
+
+  loadDrafts: async (userId: string) => {
+    const tokens = await getValidAuthTokens();
+    if (!tokens?.access_token) return;
+    try {
+      const { listUserDrafts } = await import("@/services/chatDraftsApi");
+      const { decryptDraft } = await import("@/lib/draftCrypto");
+      const { getChatKeys } = await import("@/lib/secureStorage");
+      const keys = await getChatKeys();
+      if (!keys?.private_key) return;
+
+      const drafts = await listUserDrafts(tokens.access_token);
+      const draftsMap: Record<string, string> = {};
+      for (const d of drafts) {
+        try {
+          const text = await decryptDraft(
+            d.encrypted_data,
+            d.nonce,
+            d.encrypted_aes_key,
+            keys.private_key
+          );
+          if (text && text.trim()) {
+            draftsMap[d.room_id] = text;
+          }
+        } catch (err) {
+          console.warn("[Drafts] Failed to decrypt draft for room", d.room_id, err);
+        }
+      }
+      set({ draftsByRoomId: draftsMap });
+    } catch (err) {
+      console.warn("[Drafts] Failed to load drafts:", err);
+    }
+  },
+
+  setDraftLocally: (roomId: string, text: string) => {
+    set((s) => {
+      const copy = { ...s.draftsByRoomId };
+      if (!text || !text.trim()) {
+        delete copy[roomId];
+      } else {
+        copy[roomId] = text;
+      }
+      return { draftsByRoomId: copy };
+    });
+  },
+
+  saveDraftToServer: async (roomId: string, text: string) => {
+    if (!roomId) return;
+    const trimmed = text.trim();
+    if (!trimmed) {
+      await get().deleteDraftFromServer(roomId);
+      return;
+    }
+    get().setDraftLocally(roomId, text);
+
+    try {
+      const { getChatKeys } = await import("@/lib/secureStorage");
+      const keys = await getChatKeys();
+      if (!keys?.public_key) return;
+      const { encryptDraft } = await import("@/lib/draftCrypto");
+      const payload = await encryptDraft(text, keys.public_key);
+
+      if (chatWebSocket.isConnected()) {
+        chatWebSocket.send({
+          type: "save_draft",
+          data: {
+            room_id: roomId,
+            ...payload,
+          },
+        });
+      } else {
+        const tokens = await getValidAuthTokens();
+        if (tokens?.access_token) {
+          const { saveUserDraft } = await import("@/services/chatDraftsApi");
+          await saveUserDraft(tokens.access_token, roomId, payload);
+        }
+      }
+    } catch (err) {
+      console.warn("[Drafts] Failed to save draft:", err);
+    }
+  },
+
+  deleteDraftFromServer: async (roomId: string) => {
+    if (!roomId) return;
+    get().setDraftLocally(roomId, "");
+    try {
+      if (chatWebSocket.isConnected()) {
+        chatWebSocket.send({
+          type: "delete_draft",
+          data: { room_id: roomId },
+        });
+      } else {
+        const tokens = await getValidAuthTokens();
+        if (tokens?.access_token) {
+          const { deleteUserDraft } = await import("@/services/chatDraftsApi");
+          await deleteUserDraft(tokens.access_token, roomId);
+        }
+      }
+    } catch (err) {
+      console.warn("[Drafts] Failed to delete draft:", err);
+    }
+  },
+
   loadChats: async (currentUserId: string, options?: LoadChatsOptions) => {
     if (loadChatsPromise) {
       await loadChatsPromise;
@@ -830,6 +952,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (prevLoadedFor !== null && prevLoadedFor !== currentUserId) {
         set({ chats: [], chatsLoadedForUserId: null });
       }
+
+      void get().loadDrafts(currentUserId);
 
       /** Cold start / после перезапуска: показать последний сохранённый список без пустого экрана. */
       if (typeof window !== "undefined") {
@@ -1510,38 +1634,58 @@ export const useChatStore = create<ChatState>((set, get) => ({
       recipient_keys: Array<{ user_id: string; encrypted_aes_key: string }>;
     };
     try {
-      const { maybeReplenishPrekeys } = await import("@/services/chatDevicesApi");
-      void maybeReplenishPrekeys(tokens.access_token).catch(() => {});
-      const { collectSignalTargetsForUsers } = await import("@/lib/collectSignalTargets");
-      const { encryptMessagePayloadSignalV1 } = await import("@/lib/signalE2E");
-      const signalTargets = await collectSignalTargetsForUsers(tokens.access_token, memberIds);
-      if (!signalTargets || signalTargets.length === 0) {
+      const { listUserDevices } = await import("@/services/chatDevicesApi");
+      const { encryptMessageHybridRsa } = await import("@/lib/encryptMessage");
+      const { getChatKeys } = await import("@/lib/secureStorage");
+
+      const sessionKeys = await getChatKeys();
+      const targets: Array<{ userId: string; deviceId?: string; publicKeyPem: string }> = [];
+
+      for (const uid of memberIds) {
+        try {
+          const res = await listUserDevices(tokens.access_token, uid);
+          for (const d of res.devices || []) {
+            if (d.identity_key_public) {
+              targets.push({
+                userId: uid,
+                deviceId: d.device_id,
+                publicKeyPem: d.identity_key_public,
+              });
+            }
+          }
+        } catch {
+          // ignore device fetch error
+        }
+      }
+
+      if (sessionKeys?.public_key) {
+        const { getOrCreateLocalDeviceId } = await import("@/lib/deviceIdentity");
+        const myDeviceId = await getOrCreateLocalDeviceId(String(currentUserId)).catch(() => undefined);
+        // Исключаем myDeviceId из списка, если он уже был получен через listUserDevices, во избежание дубликатов
+        const filteredTargets = targets.filter(
+          (t) => !(t.userId === String(currentUserId) && t.deviceId === myDeviceId)
+        );
+        // Всегда ставим активный ключ текущей сессии на первое место для currentUserId
+        filteredTargets.unshift({
+          userId: String(currentUserId),
+          deviceId: myDeviceId,
+          publicKeyPem: sessionKeys.public_key,
+        });
+        targets.length = 0;
+        targets.push(...filteredTargets);
+      }
+
+
+      if (targets.length === 0) {
         set({
-          error:
-            "Нет Signal-ключей у участников. Все должны войти в приложение (регистрация устройства).",
+          error: "У участников нет зарегистрированных ключей устройств.",
         });
         return null;
       }
-      const localDeviceId = await getOrCreateLocalDeviceId();
-      if (isGroupSend && roomId) {
-        const { encryptGroupSenderKeyV0 } = await import("@/lib/senderKeys");
-        e2ePayload = await encryptGroupSenderKeyV0({
-          roomId,
-          payload,
-          senderUserId: String(currentUserId),
-          senderDeviceId: localDeviceId,
-          signalTargets,
-        });
-      } else {
-        e2ePayload = await encryptMessagePayloadSignalV1(
-          payload,
-          signalTargets,
-          String(currentUserId),
-          localDeviceId
-        );
-      }
+
+      e2ePayload = await encryptMessageHybridRsa(payload, targets);
     } catch (e) {
-      const msg = e instanceof Error ? e.message : "Не удалось получить ключи устройств";
+      const msg = e instanceof Error ? e.message : "Не удалось зашифровать сообщение";
       set({ error: msg });
       return null;
     }
@@ -1645,6 +1789,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({ chats: reordered });
     }
 
+    if (roomId) {
+      void get().deleteDraftFromServer(roomId);
+    }
     queueMicrotask(() => persistActiveThreadSnapshot(get, false));
     return chatMessage;
   },
@@ -1717,7 +1864,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const full = await getMessage(tokens.access_token, messageId);
       if (!full) return;
       const me = currentUserId.toLowerCase();
-      const localDeviceId = await getOrCreateLocalDeviceId().catch(() => null);
+      const localDeviceId = await getOrCreateLocalDeviceId(currentUserId).catch(() => null);
       const content = await decryptMessageForDevice(
         full.encrypted_data,
         full.nonce,
@@ -1756,14 +1903,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       const chatState = get();
       const senderLower = senderId.toLowerCase();
+      // Для исходящих сообщений (isOwnMsg) собеседник — это recipientId, а для входящих — senderId
+      const peerIdLower = isOwnMsg
+        ? (recipientId ? recipientId.toLowerCase() : "")
+        : senderLower;
+
       const chatIdx = chatState.chats.findIndex(
         (c) =>
-          String(c.otherUser.id).toLowerCase() === senderLower ||
+          (peerIdLower && String(c.otherUser.id).toLowerCase() === peerIdLower) ||
           (roomId && String(c.id).toLowerCase() === String(roomId).toLowerCase()),
       );
       if (chatIdx >= 0) {
         const chat = chatState.chats[chatIdx];
-        const unreadDelta = isForActiveChat ? 0 : 1;
+        const unreadDelta = isForActiveChat || isOwnMsg ? 0 : 1;
         const updated: ChatListItem = {
           ...chat,
           lastMessage: newMsg,
@@ -1776,10 +1928,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
         void get().loadChats(currentUserId);
       }
 
-      if (isForActiveChat && !alreadyInActive) {
-        const next = get().activeChatMessages;
-        if (!next.some((m) => m.id === messageId)) {
-          const merged = [...next, newMsg].sort(
+      if (isForActiveChat) {
+        const currentMsgs = get().activeChatMessages;
+        // Если это наше собственное сообщение, проверим, есть ли временное 'msg_...'
+        if (isOwnMsg) {
+          const optIdx = currentMsgs.findIndex((m) => m.isOwn && m.id.startsWith("msg_"));
+          if (optIdx >= 0) {
+            set({
+              activeChatMessages: currentMsgs.map((m, i) => (i === optIdx ? newMsg : m)),
+            });
+            queueMicrotask(() => persistActiveThreadSnapshot(get, false));
+            return;
+          }
+        }
+
+        if (!currentMsgs.some((m) => m.id === messageId)) {
+          const merged = [...currentMsgs, newMsg].sort(
             (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
           );
           set({ activeChatMessages: merged });

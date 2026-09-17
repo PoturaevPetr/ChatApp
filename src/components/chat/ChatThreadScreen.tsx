@@ -381,10 +381,25 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
     applyMessageReaction,
     peerTyping,
     setChatNotificationsEnabled,
+    draftsByRoomId,
+    saveDraftToServer,
+    deleteDraftFromServer,
+    setDraftLocally,
   } = useChatStore();
   const isSocketConnected = useWebSocketStore((s) => s.isConnected);
   const ensureConnected = useWebSocketStore((s) => s.ensureConnected);
   const [input, setInput] = useState("");
+
+  const currentRoomId = useMemo(() => {
+    if (activeRoomId) return activeRoomId;
+    if (roomIdParam) return roomIdParam;
+    if (userId) {
+      const uidLower = userId.toLowerCase();
+      const found = chats.find((c) => String(c.otherUser.id).toLowerCase() === uidLower);
+      if (found) return found.id;
+    }
+    return null;
+  }, [activeRoomId, roomIdParam, userId, chats]);
   const [fileError, setFileError] = useState<string | null>(null);
   const [replyingTo, setReplyingTo] = useState<ReplyTo | null>(null);
   const [attachModalOpen, setAttachModalOpen] = useState(false);
@@ -441,6 +456,109 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
   const inputRef = useRef<HTMLInputElement>(null);
   const composerInputFocusedRef = useRef(false);
   const inputTrimRef = useRef("");
+  const isLocallyModifiedRef = useRef(false);
+  const lastSyncedDraftRef = useRef<string | null>(null);
+  const draftDebounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const currentRoomIdRef = useRef<string | null>(null);
+  const latestInputRef = useRef(input);
+  latestInputRef.current = input;
+  currentRoomIdRef.current = currentRoomId;
+
+  // Двусторонняя синхронизация черновика из облака (события с других устройств или при смене комнаты)
+  useEffect(() => {
+    if (!currentRoomId) return;
+    const remoteDraft = draftsByRoomId[currentRoomId] ?? "";
+
+    // Если входящий черновик идентичен уже примененному — повторно не дергаем
+    if (remoteDraft === lastSyncedDraftRef.current) return;
+
+    // 1) Если поле не в фокусе (пользователь не печатает прямо сейчас) ->
+    // любое обновление с другого устройства (новый текст, правка или полное удаление) мгновенно применяется
+    if (!composerInputFocusedRef.current) {
+      setInput(remoteDraft);
+      lastSyncedDraftRef.current = remoteDraft;
+      isLocallyModifiedRef.current = false;
+      return;
+    }
+
+    // 2) Если поле в фокусе, но пользователь ещё не делал несохраненных локальных правок
+    // (или текущий текст совпадает с прошлым синхронизированным черновиком) -> обновляем
+    if (!isLocallyModifiedRef.current || input === (lastSyncedDraftRef.current ?? "")) {
+      setInput(remoteDraft);
+      lastSyncedDraftRef.current = remoteDraft;
+      isLocallyModifiedRef.current = false;
+      return;
+    }
+  }, [currentRoomId, draftsByRoomId, input]);
+
+  // Сброс флагов при переключении комнаты
+  useEffect(() => {
+    isLocallyModifiedRef.current = false;
+    lastSyncedDraftRef.current = null;
+  }, [threadPeerId, roomIdParam]);
+
+  // Сохранение черновика при уходе из чата / размонтировании (только если были несохраненные локальные правки)
+  useEffect(() => {
+    return () => {
+      if (draftDebounceTimerRef.current) {
+        clearTimeout(draftDebounceTimerRef.current);
+        draftDebounceTimerRef.current = null;
+      }
+      const rid = currentRoomIdRef.current;
+      const text = latestInputRef.current;
+      if (rid && isLocallyModifiedRef.current && text !== (lastSyncedDraftRef.current ?? "")) {
+        if (text.trim()) {
+          void useChatStore.getState().saveDraftToServer(rid, text);
+        } else {
+          void useChatStore.getState().deleteDraftFromServer(rid);
+        }
+      }
+    };
+  }, []);
+
+  const scheduleDraftSave = useCallback((text: string) => {
+    if (draftDebounceTimerRef.current) {
+      clearTimeout(draftDebounceTimerRef.current);
+      draftDebounceTimerRef.current = null;
+    }
+    const rid = currentRoomId;
+    if (!rid) return;
+    draftDebounceTimerRef.current = setTimeout(() => {
+      draftDebounceTimerRef.current = null;
+      if (!text.trim()) {
+        void deleteDraftFromServer(rid);
+        lastSyncedDraftRef.current = "";
+        isLocallyModifiedRef.current = false;
+      } else {
+        void saveDraftToServer(rid, text);
+        lastSyncedDraftRef.current = text;
+        isLocallyModifiedRef.current = false;
+      }
+    }, 1200);
+  }, [currentRoomId, deleteDraftFromServer, saveDraftToServer]);
+
+  const flushDraftNow = useCallback(() => {
+    if (draftDebounceTimerRef.current) {
+      clearTimeout(draftDebounceTimerRef.current);
+      draftDebounceTimerRef.current = null;
+    }
+    const rid = currentRoomId;
+    if (!rid) return;
+    const currentText = inputRef.current?.value ?? latestInputRef.current;
+    // Если текст не менялся локально и совпадает с последним синхронизированным с сервера — ничего повторно не отправляем
+    if (!isLocallyModifiedRef.current && (currentText === (lastSyncedDraftRef.current ?? ""))) {
+      return;
+    }
+    if (!currentText.trim()) {
+      void deleteDraftFromServer(rid);
+      lastSyncedDraftRef.current = "";
+      isLocallyModifiedRef.current = false;
+    } else {
+      void saveDraftToServer(rid, currentText);
+      lastSyncedDraftRef.current = currentText;
+      isLocallyModifiedRef.current = false;
+    }
+  }, [currentRoomId, deleteDraftFromServer, saveDraftToServer]);
   /** После отправки не подгружать подсказку из буфера снова, пока поле не потеряет фокус (иначе сразу после `setInput("")` эффект перечитает буфер). */
   const suppressClipboardSuggestionUntilBlurRef = useRef(false);
   const typingStopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1595,11 +1713,20 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
   const handleSend = async () => {
     const text = input.trim();
     if (!text) return;
+    if (draftDebounceTimerRef.current) {
+      clearTimeout(draftDebounceTimerRef.current);
+      draftDebounceTimerRef.current = null;
+    }
+    if (currentRoomId) {
+      void deleteDraftFromServer(currentRoomId);
+    }
     flushTypingToServer();
     setEmojiKeyboardOpen(false);
     await sendMessage(user.id, threadPeerId, text, undefined, replyingTo ?? undefined);
     setReplyingTo(null);
     setInput("");
+    isLocallyModifiedRef.current = false;
+    lastSyncedDraftRef.current = "";
     clearClipboardSuggestionAfterSend();
     scrollThreadToBottomAfterSend();
   };
@@ -1612,12 +1739,21 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
       setFileError(`Файл «${file.name}» не отправлен: максимум ${maxAttachmentSizeLabelMb()} МБ`);
       return;
     }
+    if (draftDebounceTimerRef.current) {
+      clearTimeout(draftDebounceTimerRef.current);
+      draftDebounceTimerRef.current = null;
+    }
+    if (currentRoomId) {
+      void deleteDraftFromServer(currentRoomId);
+    }
     setEmojiKeyboardOpen(false);
     void (async () => {
       flushTypingToServer();
       await sendMessage(user.id, threadPeerId, input.trim(), { nativeFile: file }, replyingTo ?? undefined);
       setReplyingTo(null);
       setInput("");
+      isLocallyModifiedRef.current = false;
+      lastSyncedDraftRef.current = "";
       clearFileInputs();
       clearClipboardSuggestionAfterSend();
       scrollThreadToBottomAfterSend();
@@ -2953,6 +3089,11 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
                             onSelect={(emoji) => {
                               setInput((prev) => {
                                 const next = prev + emoji;
+                                isLocallyModifiedRef.current = true;
+                                if (currentRoomId) {
+                                  setDraftLocally(currentRoomId, next);
+                                  scheduleDraftSave(next);
+                                }
                                 if (next.trim()) queueMicrotask(() => bumpComposerTyping());
                                 return next;
                               });
@@ -2967,11 +3108,17 @@ export function ChatThreadScreen({ mode = "standalone" }: { mode?: ChatThreadScr
                       value={input}
                       onChange={(e) => {
                         const v = e.target.value;
+                        isLocallyModifiedRef.current = true;
                         setInput(v);
+                        if (currentRoomId) {
+                          setDraftLocally(currentRoomId, v);
+                          scheduleDraftSave(v);
+                        }
                         if (v.trim()) bumpComposerTyping();
                         else flushTypingToServer();
                       }}
                       onBlur={() => {
+                        flushDraftNow();
                         flushTypingToServer();
                         setComposerInputFocused(false);
                         suppressClipboardSuggestionUntilBlurRef.current = false;

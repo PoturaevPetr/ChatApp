@@ -263,6 +263,43 @@ export function WebSocketInitializer() {
         }
       }
 
+      if (message.type === "draft_updated" && data) {
+        const payload = data as {
+          room_id?: string;
+          encrypted_data?: string;
+          nonce?: string;
+          encrypted_aes_key?: string;
+        };
+        const roomId = payload.room_id ? String(payload.room_id) : "";
+        if (roomId && payload.encrypted_data && payload.nonce && payload.encrypted_aes_key) {
+          void (async () => {
+            try {
+              const { getChatKeys } = await import("@/lib/secureStorage");
+              const keys = await getChatKeys();
+              if (!keys?.private_key) return;
+              const { decryptDraft } = await import("@/lib/draftCrypto");
+              const text = await decryptDraft(
+                payload.encrypted_data!,
+                payload.nonce!,
+                payload.encrypted_aes_key!,
+                keys.private_key
+              );
+              useChatStore.getState().setDraftLocally(roomId, text);
+            } catch (err) {
+              console.warn("[WebSocket] Failed to decrypt draft_updated:", err);
+            }
+          })();
+        }
+      }
+
+      if (message.type === "draft_deleted" && data) {
+        const payload = data as { room_id?: string };
+        const roomId = payload.room_id ? String(payload.room_id) : "";
+        if (roomId) {
+          useChatStore.getState().setDraftLocally(roomId, "");
+        }
+      }
+
       if (message.type === "user_online" && data) {
         const uid = String((data as { user_id?: string }).user_id ?? "");
         if (uid && uid !== user.id) updatePeerPresence(uid, true);

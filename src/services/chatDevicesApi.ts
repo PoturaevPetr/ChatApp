@@ -201,17 +201,22 @@ export async function revokeDevice(accessToken: string, deviceId: string): Promi
 export async function approveDeviceLogin(
   accessToken: string,
   code: string,
+  encryptedMasterKey?: string,
 ): Promise<{ approved: boolean; login_device_id: string }> {
   const { getOrCreateLocalDeviceId } = await import("@/lib/deviceIdentity");
   const deviceId = await getOrCreateLocalDeviceId();
   const url = `${BASE_URL.replace(/\/$/, "")}/api/v1/devices/link/approve-login`;
+  const body: Record<string, unknown> = { code, device_id: deviceId };
+  if (encryptedMasterKey) {
+    body.encrypted_master_key = encryptedMasterKey;
+  }
   const res = await fetch(url, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${accessToken}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ code, device_id: deviceId }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(await parseError(res));
   return (await res.json()) as { approved: boolean; login_device_id: string };
@@ -244,11 +249,14 @@ export async function ensureDeviceRegistered(accessToken: string): Promise<Local
     /* best-effort */
   }
 
-  const { setChatKeys } = await import("@/lib/secureStorage");
-  await setChatKeys({
-    public_key: identity.publicKeyPem,
-    private_key: identity.privateKeyPem,
-  });
+  const { getChatKeys, setChatKeys } = await import("@/lib/secureStorage");
+  const existingKeys = await getChatKeys();
+  if (!existingKeys?.private_key) {
+    await setChatKeys({
+      public_key: identity.publicKeyPem,
+      private_key: identity.privateKeyPem,
+    });
+  }
 
   return { identity, device };
 }

@@ -71,7 +71,14 @@ class ChatWebSocketClient {
       this.url != null && wsUrlUserId(this.url) === userId && wsUrlUserId(newUrl) === userId;
     // Уже открыт сокет этого пользователя (другой token в URL не трогаем — сервер уже принял сессию).
     if (this.ws?.readyState === WebSocket.OPEN && sameAccount) return;
-    // CONNECTING не отсекаем: после смены сети сокет может «висеть», тогда нужен новый connect() ниже.
+
+    // Если сокет уже в процессе подключения к тому же URL (например, двойной вызов при маунте) — не обрываем его
+    if (this.ws?.readyState === WebSocket.CONNECTING && this.url === newUrl) {
+      if (callbacks) {
+        this.callbacks = { ...this.callbacks, ...callbacks };
+      }
+      return;
+    }
 
     const hadSocket = !!this.ws;
     this.disconnect();

@@ -4,6 +4,10 @@ server {
     root /usr/share/nginx/html;
     index index.html;
 
+    # Предотвращает сброс порта в Docker при редиректах директорий (например, /auth -> /auth/)
+    absolute_redirect off;
+    port_in_redirect off;
+
     gzip on;
     gzip_types text/plain text/css application/json application/javascript text/xml application/xml;
 

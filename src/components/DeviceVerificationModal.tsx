@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { createPortal } from "react-dom";
 import { KeyRound, Loader2, QrCode, ShieldAlert, X } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
@@ -16,6 +17,7 @@ import { setChatKeys, setChatKeysForUser } from "@/lib/secureStorage";
 const MODAL_Z = 10080;
 
 export function DeviceVerificationModal() {
+  const router = useRouter();
   const { user, needsKeyRestore, clearNeedsKeyRestore, logout } = useAuthStore();
   const reloadChats = useChatStore((s) => s.loadChats);
 
@@ -89,10 +91,49 @@ export function DeviceVerificationModal() {
             if (poll.status === "approved") {
               stopPoll();
               stopRefresh();
+              if (poll.encrypted_master_key) {
+                try {
+                  const ident = await getOrCreateLocalDeviceIdentity();
+                  const { decryptMasterKeyFromDevice, extractPublicKeyFromPrivateKeyPem } = await import("@/lib/rsaKeypair");
+                  const restoredPem = await decryptMasterKeyFromDevice(
+                    poll.encrypted_master_key,
+                    ident.privateKeyPem
+                  );
+                  const masterPublicKeyPem = await extractPublicKeyFromPrivateKeyPem(restoredPem);
+                  const { setLocalDeviceIdentityKeys } = await import("@/lib/deviceIdentity");
+                  await setLocalDeviceIdentityKeys(masterPublicKeyPem, restoredPem, user?.id);
+
+                  const restoredKeys = {
+                    public_key: masterPublicKeyPem,
+                    private_key: restoredPem,
+                  };
+                  await setChatKeys(restoredKeys);
+                  if (user?.id) {
+                    await setChatKeysForUser(user.id, restoredKeys);
+                  }
+                  if (poll.access_token) {
+                    const { ensureDeviceRegistered } = await import("@/services/chatDevicesApi");
+                    try {
+                      await ensureDeviceRegistered(poll.access_token);
+                    } catch {
+                      /* best-effort */
+                    }
+                  }
+                } catch (e) {
+                  console.warn("Failed to decrypt master key from QR approval:", e);
+                }
+              }
               // После подтверждения связки токены обновлены, ключи устройства зарегистрированы
               clearNeedsKeyRestore();
               setOpen(false);
-              if (user?.id) void reloadChats(user.id);
+              const chatStore = useChatStore.getState();
+              if (user?.id) {
+                void chatStore.loadChats(user.id);
+                const activePeerId = chatStore.activeChatUser?.id;
+                if (activePeerId) {
+                  void chatStore.loadMessages(user.id, activePeerId);
+                }
+              }
             } else if (poll.status === "expired") {
               stopPoll();
               void startQrFlow();
@@ -107,7 +148,7 @@ export function DeviceVerificationModal() {
     } finally {
       setQrLoading(false);
     }
-  }, [clearNeedsKeyRestore, reloadChats, stopPoll, stopRefresh]);
+  }, [clearNeedsKeyRestore, stopPoll, stopRefresh, user?.id]);
 
   useEffect(() => {
     if (open && tab === "qr") {
@@ -152,9 +193,16 @@ export function DeviceVerificationModal() {
         passphrase,
       );
 
-      const localIdent = await getOrCreateLocalDeviceIdentity();
+      // Извлекаем публичный ключ, в точности соответствующий восстановленному мастер-ключу
+      const { extractPublicKeyFromPrivateKeyPem } = await import("@/lib/rsaKeypair");
+      const masterPublicKeyPem = await extractPublicKeyFromPrivateKeyPem(restoredPem);
+
+      // Обновляем крипто-идентичность устройства: теперь оно обладает мастер-ключами
+      const { setLocalDeviceIdentityKeys } = await import("@/lib/deviceIdentity");
+      await setLocalDeviceIdentityKeys(masterPublicKeyPem, restoredPem, user?.id);
+
       const restoredKeys = {
-        public_key: localIdent.publicKeyPem,
+        public_key: masterPublicKeyPem,
         private_key: restoredPem,
       };
 
@@ -163,12 +211,26 @@ export function DeviceVerificationModal() {
         await setChatKeysForUser(user.id, restoredKeys);
       }
 
+      const { ensureDeviceRegistered } = await import("@/services/chatDevicesApi");
+      try {
+        await ensureDeviceRegistered(tokens.access_token);
+      } catch {
+        /* best-effort */
+      }
+
       setPassphraseSuccess("Ключ успешно расшифрован!");
       clearNeedsKeyRestore();
 
       setTimeout(() => {
         setOpen(false);
-        if (user?.id) void reloadChats(user.id);
+        const chatStore = useChatStore.getState();
+        if (user?.id) {
+          void chatStore.loadChats(user.id);
+          const activePeerId = chatStore.activeChatUser?.id;
+          if (activePeerId) {
+            void chatStore.loadMessages(user.id, activePeerId);
+          }
+        }
       }, 500);
     } catch (err) {
       setPassphraseError(
@@ -203,7 +265,10 @@ export function DeviceVerificationModal() {
           </div>
           <button
             type="button"
-            onClick={() => void logout()}
+            onClick={async () => {
+              await logout();
+              router.push("/auth/login/");
+            }}
             className="text-xs text-destructive/80 hover:text-destructive hover:underline px-2 py-1"
           >
             Выйти

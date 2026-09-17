@@ -103,7 +103,7 @@ export type ChatListProps = {
 export function ChatList({ allowNativePullToRefresh = true }: ChatListProps) {
   const { user } = useAuthStore();
   const llmEnabled = useLlmAccessStore((s) => s.enabled);
-  const { chats, loadUsers, loadChats, isLoading, error } = useChatStore();
+  const { chats, loadUsers, loadChats, isLoading, error, draftsByRoomId } = useChatStore();
   const ensureConnected = useWebSocketStore((s) => s.ensureConnected);
   const [search, setSearch] = useState("");
   const [startChatOpen, setStartChatOpen] = useState(false);
@@ -233,22 +233,31 @@ export function ChatList({ allowNativePullToRefresh = true }: ChatListProps) {
                       <div className="min-w-0 flex-1">
                         <div className="truncate font-medium text-foreground">{chat.otherUser.name}</div>
                         <p className="mt-0.5 truncate text-sm text-muted-foreground">
-                          {chat.lastMessage
-                            ? lastMessagePreviewForList(chat.lastMessage, user.id, chat)
-                            : "Нет сообщений"}
+                          {draftsByRoomId[chat.id] ? (
+                            <>
+                              <span className="font-medium text-destructive">Черновик: </span>
+                              <span className="text-foreground/80">{draftsByRoomId[chat.id]}</span>
+                            </>
+                          ) : chat.lastMessage ? (
+                            lastMessagePreviewForList(chat.lastMessage, user.id, chat)
+                          ) : (
+                            "Нет сообщений"
+                          )}
                         </p>
                       </div>
-                      {chat.lastMessage ? (
+                      {chat.lastMessage || chat.unreadCount > 0 ? (
                         <div className="flex shrink-0 flex-col items-end gap-0.5 pt-0.5">
-                          <span className="text-xs leading-none text-muted-foreground tabular-nums">
-                            {formatMessageTime(chat.lastMessage.timestamp)}
-                          </span>
+                          {chat.lastMessage ? (
+                            <span className="text-xs leading-none text-muted-foreground tabular-nums">
+                              {formatMessageTime(chat.lastMessage.timestamp)}
+                            </span>
+                          ) : null}
                           {chat.unreadCount > 0 ? (
                             <span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary text-[10px] font-medium leading-none text-primary-foreground">
                               {chat.unreadCount > 99 ? "99+" : chat.unreadCount}
                             </span>
                           ) : null}
-                          {isOwnMessage(chat.lastMessage, user.id) ? (
+                          {chat.lastMessage && isOwnMessage(chat.lastMessage, user.id) ? (
                             <OutgoingReceiptTicks status={chat.lastMessage.status} variant="onClear" />
                           ) : null}
                         </div>

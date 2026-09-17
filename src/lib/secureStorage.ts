@@ -161,22 +161,49 @@ export async function setAuthWithTokens(
   else await setChatKeys(null);
 }
 
-export async function clearAuthData(): Promise<void> {
+export async function deleteChatKeysForUser(userId: string): Promise<void> {
+  await cryptoSecureDelete(secureUserKeysKey(userId));
+  const s = await getStorage();
+  await s.remove(LEGACY_AUTH_KEYS_PREFIX + userId);
+}
+
+/**
+ * Clear session data (tokens, user info, and local master keys).
+ * On next login, cloud password or QR confirmation is required (Zero-Trust).
+ */
+export async function clearSession(): Promise<void> {
   const s = await getStorage();
   const userRaw = await s.get(AUTH_USER_KEY);
   await s.remove(AUTH_USER_KEY);
   await s.remove(AUTH_TOKENS_KEY);
   await s.remove(LEGACY_AUTH_KEYS_KEY);
   await cryptoSecureDelete(SECURE_SESSION_KEYS);
+  await cryptoSecureDelete("crypto:local_device_id");
   if (userRaw) {
     try {
       const u = JSON.parse(userRaw) as StoredUser;
       if (u?.id) {
-        await cryptoSecureDelete(secureUserKeysKey(u.id));
-        await s.remove(LEGACY_AUTH_KEYS_PREFIX + u.id);
+        await deleteChatKeysForUser(u.id);
+        await cryptoSecureDelete(`crypto:local_device_id:${u.id}`);
       }
     } catch {
       /* ignore */
     }
   }
+}
+
+/**
+ * Full device wipe: removes ALL crypto material including RSA keys,
+ * device identity, and Signal sessions.
+ */
+export async function wipeAllDeviceData(): Promise<void> {
+  await clearSession();
+}
+
+/**
+ * @deprecated Use clearSession() for normal logout or wipeAllDeviceData() for full wipe.
+ * Kept for backward compatibility — now calls clearSession() (preserves crypto keys).
+ */
+export async function clearAuthData(): Promise<void> {
+  await clearSession();
 }

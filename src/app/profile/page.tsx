@@ -330,7 +330,7 @@ export default function ProfilePage() {
           onConfirm={async () => {
             setShowLogoutModal(false);
             await logout();
-            router.push("/auth/");
+            router.push("/auth/login/");
           }}
         />
 

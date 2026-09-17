@@ -79,6 +79,7 @@ export interface DeviceLinkPollResponse {
   refresh_token?: string;
   user_id?: string;
   username?: string;
+  encrypted_master_key?: string | null;
 }
 
 export interface RefreshTokenRequest {

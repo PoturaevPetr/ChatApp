@@ -3,7 +3,7 @@
  * Используйте вместо getAuthTokens() перед запросами к API.
  */
 
-import { getAuth, getAuthTokens, setAuthWithTokens, clearAuthData } from "@/lib/secureStorage";
+import { getAuth, getAuthTokens, setAuthWithTokens, clearSession } from "@/lib/secureStorage";
 import type { StoredAuthTokens, StoredUser } from "@/lib/secureStorage";
 import { chatAuthApi, ChatAuthApiError } from "@/services/chatAuthApi";
 
@@ -27,7 +27,7 @@ async function refreshSession(user: StoredUser, tokens: StoredAuthTokens): Promi
     return newTokens;
   } catch (e) {
     if (e instanceof ChatAuthApiError && e.status === 401) {
-      await clearAuthData();
+      await clearSession();
       return null;
     }
     return tokens;
@@ -67,7 +67,7 @@ export async function getValidAuthTokens(): Promise<StoredAuthTokens | null> {
   if (!needsRefresh) return tokens;
 
   if (!tokens.refresh_token) {
-    await clearAuthData();
+    await clearSession();
     return null;
   }
 

@@ -27,16 +27,32 @@ function randomDeviceId(): string {
   return `dev_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
-export async function getOrCreateLocalDeviceId(): Promise<string> {
-  const existing = await cryptoSecureGet(DEVICE_ID_KEY);
+export async function getOrCreateLocalDeviceId(explicitUserId?: string): Promise<string> {
+  let userId = explicitUserId;
+  if (!userId) {
+    try {
+      const { getAuth } = await import("@/lib/secureStorage");
+      const authUser = await getAuth();
+      if (authUser?.id) userId = authUser.id;
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const key = userId ? `crypto:local_device_id:${userId}` : DEVICE_ID_KEY;
+  const existing = await cryptoSecureGet(key);
   if (existing) return existing;
+
   const id = randomDeviceId();
-  await cryptoSecureSet(DEVICE_ID_KEY, id);
+  await cryptoSecureSet(key, id);
+  if (userId) {
+    await cryptoSecureSet(DEVICE_ID_KEY, id);
+  }
   return id;
 }
 
-export async function getOrCreateLocalDeviceIdentity(): Promise<LocalDeviceIdentity> {
-  const deviceId = await getOrCreateLocalDeviceId();
+export async function getOrCreateLocalDeviceIdentity(explicitUserId?: string): Promise<LocalDeviceIdentity> {
+  const deviceId = await getOrCreateLocalDeviceId(explicitUserId);
   const privKey = deviceCryptoKey(deviceId, "identity_private");
   const pubKey = deviceCryptoKey(deviceId, "identity_public");
   const regKey = deviceCryptoKey(deviceId, "registration_id");
@@ -55,6 +71,37 @@ export async function getOrCreateLocalDeviceIdentity(): Promise<LocalDeviceIdent
     await cryptoSecureSet(regKey, String(registrationId));
   }
 
+    return {
+    deviceId,
+    publicKeyPem,
+    privateKeyPem,
+    registrationId,
+  };
+}
+
+/**
+ * Установить ключи идентичности текущего устройства равными мастер-ключам аккаунта
+ * (вызывается после успешного восстановления мастер-ключа через пароль или QR).
+ */
+export async function setLocalDeviceIdentityKeys(
+  publicKeyPem: string,
+  privateKeyPem: string,
+  explicitUserId?: string
+): Promise<LocalDeviceIdentity> {
+  const deviceId = await getOrCreateLocalDeviceId(explicitUserId);
+  const privKey = deviceCryptoKey(deviceId, "identity_private");
+  const pubKey = deviceCryptoKey(deviceId, "identity_public");
+  const regKey = deviceCryptoKey(deviceId, "registration_id");
+
+  let registrationId = Number((await cryptoSecureGet(regKey)) || "0");
+  if (!registrationId) {
+    registrationId = Math.floor(Math.random() * 16380) + 1;
+    await cryptoSecureSet(regKey, String(registrationId));
+  }
+
+  await cryptoSecureSet(privKey, privateKeyPem);
+  await cryptoSecureSet(pubKey, publicKeyPem);
+
   return {
     deviceId,
     publicKeyPem,
@@ -62,6 +109,7 @@ export async function getOrCreateLocalDeviceIdentity(): Promise<LocalDeviceIdent
     registrationId,
   };
 }
+
 
 export function guessDevicePlatform(): string {
   return guessClientPlatformForApi();
